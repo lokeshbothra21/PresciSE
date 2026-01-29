@@ -1,0 +1,13 @@
+app:
+  name: "PresciSE"
+  environment: "local"
+  log_level: "INFO"
+
+security:
+  allow_external_llm_access: true
+  local_data_only: true
+  external_llm_provider: "gemini"
+
+limits:
+  max_query_length: 512
+  max_documents_per_query: 10

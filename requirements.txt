@@ -1,0 +1,33 @@
+# Core
+pydantic>=2.0
+pyyaml
+python-dotenv
+
+# NLP & IR
+spacy
+scikit-learn
+rank-bm25
+nltk
+
+# Vector search
+faiss-cpu
+sentence-transformers
+
+# LLM orchestration
+langchain
+langgraph
+google-genai
+
+# Document processing
+docling
+
+# API & CLI
+fastapi
+uvicorn
+typer
+
+# Utilities
+loguru
+tenacity
+numpy
+pandas
