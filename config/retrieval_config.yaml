@@ -1,0 +1,12 @@
+lexical:
+  enabled: true
+  top_k: 10
+
+semantic:
+  enabled: true
+  top_k: 10
+  embedding_model: "sentence-transformers/all-MiniLM-L6-v2"
+
+reranking:
+  enabled: true
+  top_k: 5
