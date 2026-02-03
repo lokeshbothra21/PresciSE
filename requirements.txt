@@ -10,13 +10,18 @@ rank-bm25
 nltk
 
 # Vector search
-faiss-cpu
+faiss-cpu  # Use faiss-gpu if GPU available
 sentence-transformers
 
 # LLM orchestration
 langchain
 langgraph
 google-genai
+
+# Dynamic router (Qwen2.5)
+torch>=2.0.0
+transformers>=4.35.0
+peft  # Required for SPECTER2 PEFT adapters
 
 # Document processing
 docling

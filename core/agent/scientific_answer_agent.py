@@ -16,7 +16,13 @@ class ScientificAnswerAgent:
         blocks = []
         for item in retrieved_chunks:
             chunk = item["chunk"]
-            blocks.append(f"[{chunk['chunk_id']}] {chunk['text']}")
+            # Extract doc_id and page numbers from chunk
+            doc_id = chunk.get("doc_id", "unknown")
+            pages = chunk.get("metadata", {}).get("pages", [])
+            # Use first page number if available
+            page_num = pages[0] if pages and pages[0] > 0 else "unknown"
+            citation = f"[{doc_id}, page {page_num}]"
+            blocks.append(f"{citation} {chunk['text']}")
         return "\n\n".join(blocks)
 
     def answer(self, query: str, retrieved_chunks: List[Dict[str, Any]]) -> str:

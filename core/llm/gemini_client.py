@@ -1,12 +1,13 @@
 import os
 from google import genai
+from google.genai import types
 
 class GeminiClient:
     """
     Minimal Gemini API wrapper used by PresciSE.
     """
 
-    def __init__(self, model_name: str = "gemini-2.5-flash"):
+    def __init__(self, model_name: str = "gemini-2.5-flash-lite"):
         api_key = os.getenv("GEMINI_API_KEY")
         self.is_mock = False
         
@@ -33,7 +34,16 @@ class GeminiClient:
             )
             
         try:
-            response = self.client.models.generate_content(model=self.model_name, contents=prompt)
+            # Create config with temperature
+            config = types.GenerateContentConfig(
+                temperature=0.2
+            )
+            
+            response = self.client.models.generate_content(
+                model=self.model_name,
+                contents=prompt,
+                config=config
+            )
             return response.text
         except Exception as e:
             return f"Error generating response: {e}"

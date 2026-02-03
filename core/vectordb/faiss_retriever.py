@@ -1,4 +1,6 @@
 from typing import List, Dict
+import faiss
+import os
 from core.vectordb.faiss_index import FAISSIndex
 
 
@@ -47,3 +49,22 @@ class FAISSRetriever:
             results.append({"chunk": chunk, "score": float(score)})
 
         return results
+    
+    def save_retriever(self, filepath: str) -> None:
+        """
+        Save FAISS index to disk.
+        
+        Args:
+            filepath: Path to save FAISS index file
+        """
+        os.makedirs(os.path.dirname(filepath), exist_ok=True)
+        faiss.write_index(self.index.index, filepath)
+    
+    def load_retriever(self, filepath: str) -> None:
+        """
+        Load FAISS index from disk.
+        
+        Args:
+            filepath: Path to FAISS index file
+        """
+        self.index.index = faiss.read_index(filepath)

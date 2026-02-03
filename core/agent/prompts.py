@@ -17,7 +17,7 @@ EVIDENCE (retrieved chunks):
 
 INSTRUCTIONS:
 - Write a clear, technical explanation.
-- Use citations in the format [chunk_id].
+- Cite sources using the format <doc_id, page X> where doc_id is the document name and X is the page number from the evidence.
 - Do not invent facts not present in evidence.
-- If multiple chunks support a statement, cite multiple: [c1][c2].
+- If multiple sources support a statement, cite all: <doc1, page 7><doc2, page 12>.
 """.strip()
