@@ -58,6 +58,9 @@ class IndexManager:
         """
         Load indexes from disk or build if needed.
         
+        Validates index integrity before loading to prevent crashes from
+        stale or corrupted index data.
+        
         Returns:
             HybridRetriever with up-to-date indexes
         """
@@ -65,6 +68,15 @@ class IndexManager:
         
         # Scan PDF directory
         current_pdfs = self._get_current_pdfs()
+        
+        # VALIDATE BEFORE LOAD: Check if indexes exist and are valid
+        if self._indexes_exist():
+            # Check if the saved chunks can be loaded and are non-empty
+            is_valid, validation_msg = self._validate_indexes(current_pdfs)
+            if not is_valid:
+                logger.warning(f"⚠️  Index validation failed: {validation_msg}")
+                logger.info("🔄 Rebuilding indexes from scratch...")
+                return self._build_from_scratch()
         
         # Detect changes
         new_docs, modified_docs, deleted_docs = self._detect_changes(current_pdfs)
@@ -83,6 +95,54 @@ class IndexManager:
             logger.info(f"  New: {len(new_docs)}, Modified: {len(modified_docs)}, Deleted: {len(deleted_docs)}")
         
         return self._incremental_update(new_docs, modified_docs, deleted_docs)
+    
+    def _validate_indexes(self, current_pdfs: Dict[str, str]) -> tuple:
+        """
+        Validate that saved indexes are consistent with current state.
+        
+        Checks:
+        1. Chunks file exists and is loadable
+        2. Chunks are non-empty
+        3. Registry documents match current PDF files
+        
+        Args:
+            current_pdfs: Dict of current PDF names to paths
+            
+        Returns:
+            Tuple of (is_valid: bool, message: str)
+        """
+        try:
+            # Check 1: Can we load chunks?
+            with open(self.chunks_path, "rb") as f:
+                chunks = pickle.load(f)
+            
+            # Check 2: Are chunks non-empty?
+            if not chunks or len(chunks) == 0:
+                return False, "Saved chunks file is empty"
+            
+            # Check 3: Do all chunks have required fields?
+            required_fields = ["chunk_id", "tokens", "text"]
+            for i, chunk in enumerate(chunks[:5]):  # Check first 5 chunks
+                for field in required_fields:
+                    if field not in chunk:
+                        return False, f"Chunk {i} missing required field: {field}"
+            
+            # Check 4: Does registry match current PDFs?
+            tracked_docs = set(self.tracker.get_all_documents().keys())
+            current_pdf_names = set(current_pdfs.keys())
+            
+            # If there are tracked docs that no longer exist, index is stale
+            missing_pdfs = tracked_docs - current_pdf_names
+            if missing_pdfs:
+                return False, f"Registry contains PDFs no longer in folder: {missing_pdfs}"
+            
+            # All checks passed
+            return True, "Index is valid"
+            
+        except FileNotFoundError:
+            return False, "Chunks file not found"
+        except Exception as e:
+            return False, f"Error validating index: {e}"
     
     def _get_current_pdfs(self) -> Dict[str, str]:
         """
@@ -232,6 +292,13 @@ class IndexManager:
                 except Exception as e:
                     logger.error(f"  ❌ Error processing {pdf_name}: {e}")
                     continue
+        
+        # Check that we have chunks to index
+        if not all_chunks:
+            raise ValueError(
+                f"No chunks were generated from PDFs in {self.pdf_dir}. "
+                "Please check that PDFs exist and are readable."
+            )
         
         # Rebuild indexes
         logger.info(f"🔨 Rebuilding indexes with {len(all_chunks)} total chunks...")

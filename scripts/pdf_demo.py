@@ -14,7 +14,8 @@ def main():
     print("=== PRESCISE PDF DEMO ===\n")
 
     load_dotenv()
-    print("GEMINI_API_KEY loaded?", bool(os.getenv("GEMINI_API_KEY")))
+    api_key = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
+    print("API Key loaded?", bool(api_key))
     
     # Use IndexManager for persistent indexes with incremental updates
     print_section_header("LOADING OR BUILDING INDEXES")
@@ -24,9 +25,10 @@ def main():
     
     print_section_header("SETTING UP AI AGENT")
 
+    # Agent now uses LangChain/LangGraph internally (maintains same interface)
     llm = GeminiClient()
     agent = ScientificAnswerAgent(llm)
-    print("  Agent ready\n")
+    print("  Agent ready (LangGraph workflow)\n")
 
 
     # Query

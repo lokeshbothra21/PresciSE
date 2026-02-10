@@ -1,6 +1,10 @@
 from typing import List, Optional
 from sentence_transformers import SentenceTransformer
 import torch
+import warnings
+
+# Suppress transformers generation warnings (not relevant for embeddings)
+warnings.filterwarnings("ignore", category=UserWarning, module="transformers.generation.configuration_utils")
 
 
 class Embedder:

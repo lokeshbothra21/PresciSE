@@ -155,7 +155,7 @@ Query: "Compare classical MD with quantum MD"
 
 Query: "MD simulation acronym"
 {{"bm25_weight": 0.8, "faiss_weight": 0.2, "intent": "exact_match", "reason": "Query seeks specific acronym definition"}}
-
+  
 CRITICAL RULES:
 1. Output ONLY the JSON object
 2. NO explanatory text before or after

@@ -16,6 +16,7 @@ sentence-transformers
 # LLM orchestration
 langchain
 langgraph
+langchain-google-genai  # Gemini integration for LangChain
 google-genai
 
 # Dynamic router (Qwen2.5)

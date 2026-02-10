@@ -8,7 +8,7 @@ def make_chunks_from_doc(doc: Union[Document, Dict[str, Any]], max_chars: int = 
     """
     Create retrieval chunks from a normalized PresciSE Document (Pydantic model or dict).
 
-    MVP strategy:
+    MVP strategy:  
     - Iterate sections
     - Split section text into smaller pieces (by character count)
     - Attach metadata (doc_id, section, pages, keywords)
