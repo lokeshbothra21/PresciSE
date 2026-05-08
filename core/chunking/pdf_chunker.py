@@ -1,7 +1,6 @@
 from typing import List, Dict, Any, Union
 from core.ingestion.document_schema import Document
 from core.nlp.tokenizer import tokenize
-from core.nlp.metadata_extractor import generate_chunk_metadata
 
 
 def make_chunks_from_doc(doc: Union[Document, Dict[str, Any]], max_chars: int = 900, overlap: int = 150) -> List[Dict[str, Any]]:
@@ -53,9 +52,6 @@ def make_chunks_from_doc(doc: Union[Document, Dict[str, Any]], max_chars: int = 
                 break
 
             chunk_id = f"{doc_id}_{section_type}_{i}_{part}"
-            
-            # Generate keyword metadata for fast search
-            keyword_metadata = generate_chunk_metadata(piece)
 
             chunks.append({
                 "chunk_id": chunk_id,
@@ -65,7 +61,6 @@ def make_chunks_from_doc(doc: Union[Document, Dict[str, Any]], max_chars: int = 
                 "metadata": {
                     "section_type": section_type,
                     "pages": pages,
-                    **keyword_metadata  # Add keywords from TF-IDF + NER
                 }
             })
 

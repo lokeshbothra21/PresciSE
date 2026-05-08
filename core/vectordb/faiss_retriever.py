@@ -58,7 +58,7 @@ class FAISSRetriever:
             filepath: Path to save FAISS index file
         """
         os.makedirs(os.path.dirname(filepath), exist_ok=True)
-        faiss.write_index(self.index.index, filepath)
+        faiss.write_index(self.index.get_persistable_index(), filepath)
     
     def load_retriever(self, filepath: str) -> None:
         """
@@ -67,4 +67,5 @@ class FAISSRetriever:
         Args:
             filepath: Path to FAISS index file
         """
-        self.index.index = faiss.read_index(filepath)
+        cpu_index = faiss.read_index(filepath)
+        self.index.load_from_cpu_index(cpu_index)

@@ -13,6 +13,7 @@ from core.agent.enhancement_prompts import (
     EXPLORATORY_GENERATION_PROMPT,
     COMPARATIVE_GENERATION_PROMPT
 )
+from loguru import logger
 
 
 # Initialize LLM for enhancement (using same Gemini client)
@@ -75,9 +76,7 @@ def generate_exploratory_subqueries(query: str) -> List[str]:
     response = llm.generate(prompt).strip()
     
     # Debug logging
-    print(f"\n[DEBUG] EXPLORATORY Generation Response:")
-    print(f"{response[:200]}..." if len(response) > 200 else response)
-    print()
+    logger.debug(f"EXPLORATORY Generation Response: {response[:200]}..." if len(response) > 200 else f"EXPLORATORY Generation Response: {response}")
     
     # Parse JSON response with regex
     import re
@@ -93,17 +92,18 @@ def generate_exploratory_subqueries(query: str) -> List[str]:
                 # Ensure all items are strings
                 subqueries = [str(sq) for sq in subqueries if sq]
                 # Limit to 3-5
+                # Limit to 3-5
                 if len(subqueries) > 5:
                     subqueries = subqueries[:5]
-                print(f"[DEBUG] Successfully parsed {len(subqueries)} subqueries\n")
+                logger.debug(f"Successfully parsed {len(subqueries)} subqueries")
                 return subqueries
     except json.JSONDecodeError as e:
-        print(f"[WARNING] JSON parsing failed: {e}")
+        logger.warning(f"JSON parsing failed: {e}")
     except Exception as e:
-        print(f"[WARNING] Unexpected error: {e}")
+        logger.warning(f"Unexpected error: {e}")
     
     # Fallback: Return empty list if parsing fails
-    print(f"[WARNING] Failed to parse subqueries. Full response:\n{response}\n")
+    logger.warning(f"Failed to parse subqueries. Full response:\n{response}")
     return []
 
 
@@ -127,9 +127,7 @@ def generate_comparative_subqueries(query: str) -> List[str]:
     response = llm.generate(prompt).strip()
     
     # Debug logging
-    print(f"\n[DEBUG] COMPARATIVE Generation Response:")
-    print(f"{response[:200]}..." if len(response) > 200 else response)
-    print()
+    logger.debug(f"COMPARATIVE Generation Response: {response[:200]}..." if len(response) > 200 else f"COMPARATIVE Generation Response: {response}")
     
     # Parse JSON response with regex
     import re
@@ -147,15 +145,15 @@ def generate_comparative_subqueries(query: str) -> List[str]:
                 # Limit to 3-4
                 if len(subqueries) > 4:
                     subqueries = subqueries[:4]
-                print(f"[DEBUG] Successfully parsed {len(subqueries)} subqueries\n")
+                logger.debug(f"Successfully parsed {len(subqueries)} subqueries")
                 return subqueries
     except json.JSONDecodeError as e:
-        print(f"[WARNING] JSON parsing failed: {e}")
+        logger.warning(f"JSON parsing failed: {e}")
     except Exception as e:
-        print(f"[WARNING] Unexpected error: {e}")
+        logger.warning(f"Unexpected error: {e}")
     
     # Fallback: Return empty list if parsing fails
-    print(f"[WARNING] Failed to parse subqueries. Full response:\n{response}\n")
+    logger.warning(f"Failed to parse subqueries. Full response:\n{response}")
     return []
 
 

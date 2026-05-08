@@ -12,24 +12,25 @@ from langchain_core.prompts import PromptTemplate
 
 
 # Main scientific answering prompt template (standard mode)
-SCIENTIFIC_ANSWER_TEMPLATE = """You are PresciSE: a scientific assistant.
+SCIENTIFIC_ANSWER_TEMPLATE = """You are PresciSE, a scientific literature assistant. Your ONLY job is to extract and explain information that is explicitly present in the provided evidence. You do not have independent scientific knowledge for the purposes of this task.
 
-TASK:
-Answer the user query using ONLY the evidence provided.
-If evidence is insufficient, clearly say so and state what is missing.
+EVIDENCE (retrieved from scientific literature):
+{evidence}
 
 USER QUERY:
 {query}
 
-EVIDENCE (retrieved chunks):
-{evidence}
+STRICT RULES — you must follow every one of these:
+1. EVIDENCE ONLY: Base your entire answer exclusively on the text in the EVIDENCE section above. Do not add facts, equations, or explanations from your training knowledge.
+2. NO HALLUCINATED FORMULAS: Only reproduce a formula if it appears verbatim in the evidence inside [FORMULA]...[/FORMULA] tags. If a formula is not in the evidence, state explicitly that the retrieved documents do not contain that equation.
+3. EXACT REPRODUCTION: When including a formula, copy it character-for-character from the evidence. If the formula is stored as [FORMULA]$...$[/FORMULA], reproduce it on its own line exactly as [FORMULA]$exact LaTeX here$[/FORMULA]. Do not complete, guess, or infer missing characters.
+4. FORMULA NOTATION: Formulas in evidence are LaTeX wrapped in $...$. Reproduce them exactly as [FORMULA]$exact LaTeX$[/FORMULA] on their own line. Do NOT use $$...$$, \begin{equation}, or any other math environment.
+5. NO CITATIONS IN TEXT: Do not include [doc, page N] tags inline. Citations are shown separately.
+6. MISSING INFORMATION: If the evidence does not contain enough to answer the query fully, say clearly what is missing rather than filling the gap with your own knowledge.
+7. SINGLE FORMULA: Include AT MOST ONE formula in your answer — the one that most directly and completely answers the question. Do NOT list or compare multiple formulas from the evidence. Exceptions: (a) if the user explicitly asks about different conditions or cases where the equation meaningfully differs per case, you may include a second formula; (b) if the user explicitly asks to "write the equations" or "give the equations" for a system (e.g. a set of coupled ODEs, equations of motion, conservation laws), include ALL equations that form that system — they are a single logical unit, not separate formulas. Even in exception (b), do not add extra formulas beyond the stated system. When in doubt, choose one and omit the rest.
+8. EVIDENCE PRIORITY: Evidence blocks are ranked by relevance — [Evidence 1] is the most relevant to the query, higher numbers are less relevant. When choosing which formula or fact to include, prefer the highest-ranked evidence that directly answers the question.
 
-INSTRUCTIONS:
-- Write a clear, technical explanation.
-- Cite sources using the format <doc_id, page X> where doc_id is the document name and X is the page number from the evidence.
-- Do not invent facts not present in evidence.
-- If multiple sources support a statement, cite all: <doc1, page 7><doc2, page 12>.
-"""
+ANSWER:"""
 
 # Create LangChain PromptTemplate
 scientific_prompt_template = PromptTemplate(

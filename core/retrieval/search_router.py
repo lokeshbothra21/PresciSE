@@ -1,228 +1,182 @@
-"""
-Dynamic Search Router using Qwen2.5-1.5B-Instruct.
+"""Fast rule-based search router for PresciSE.
 
-Analyzes query intent and determines optimal BM25/FAISS weights at runtime.
+Replaces Qwen2.5-1.5B with a sub-millisecond regex + NLP rule engine
+that keeps the same ``route(query) -> dict`` interface.
+
+Layered signal detection:
+  1. Corpus-specific physics named-entity regex
+  2. spaCy NER (PERSON/ORG) for author names Qwen missed
+  3. Formula-cue keywords / math symbols
+  4. classify_query() NLP fallback
+
+Weight table:
+  named entity + formula cue → exact_formula   (BM25 0.75, FAISS 0.25)
+  named entity only          → exact_match      (BM25 0.65, FAISS 0.35)
+  formula cue only           → formula_search   (BM25 0.70, FAISS 0.30)
+  NLP → definition           → definition_lookup(BM25 0.50, FAISS 0.50)
+  NLP → methodology          → methodology      (BM25 0.35, FAISS 0.65)
+  NLP → comparison           → comparison       (BM25 0.30, FAISS 0.70)
+  default                    → exploratory      (BM25 0.45, FAISS 0.55)
 """
 
-from transformers import AutoModelForCausalLM, AutoTokenizer
-import torch
-import json
 import re
 from typing import Dict, Optional
+
+from loguru import logger
+
+from core.nlp.query_classifier import classify_query
+from core.nlp.ner import extract_entities
 
 
 class SearchRouter:
     """
-    Lightweight LLM-based router for dynamic hybrid search weight determination.
-    
-    Uses Qwen2.5-1.5B-Instruct to analyze queries and output optimal
-    BM25 (lexical) vs FAISS (semantic) weights.
+    Rule-based router for dynamic hybrid search weight determination.
+
+    Uses a layered signal approach to classify queries and assign
+    BM25/FAISS weights without loading any ML model.  Runs in < 1 ms.
+
+    Args:
+        default_weights: Optional override for the fallback weight dict
+                         (useful in unit tests).
     """
-    
-    def __init__(self, model_name: str = "Qwen/Qwen2.5-1.5B-Instruct"):
-        """
-        Initialize router with Qwen2.5 model.
-        
-        Args:
-            model_name: Hugging Face model identifier
-        """
-        self.model_name = model_name
-        self.device = 'cuda' if torch.cuda.is_available() else 'cpu'
-        self.model: Optional[AutoModelForCausalLM] = None
-        self.tokenizer: Optional[AutoTokenizer] = None
-        
-        # Default fallback weights
-        self.default_weights = {
-            "bm25_weight": 0.6,
-            "faiss_weight": 0.4,
-            "intent": "fallback",
-            "reason": "Using default balanced weights"
+
+    # ------------------------------------------------------------------
+    # Corpus-specific physics / method terms that should boost BM25
+    # ------------------------------------------------------------------
+    _PHYSICS_ENTITY_RE = re.compile(
+        r"\b(?:"
+        r"lennard[- ]?jones|"
+        r"nos[eé][- ]?hoover|"
+        r"ewald|"
+        r"verlet|"
+        r"lammps|"
+        r"hamiltonian|"
+        r"partition[ \-]?function|"
+        r"nvt|nve|npt|"
+        r"langevin|"
+        r"amber|charmm|gromacs|namd|openmm|"
+        r"ergodic(?:ity)?|"
+        r"equipartition|"
+        r"boltzmann|"
+        r"maxwell[- ]boltzmann|"
+        r"born[- ]oppenheimer|"
+        r"rdf|"
+        r"pair[ \-]?distribution|"
+        r"radial[ \-]?distribution|"
+        r"potential[ \-]?energy|"
+        r"kinetic[ \-]?energy|"
+        r"thermostat|barostat|"
+        r"cutoff|"
+        r"periodic[ \-]?boundary|pbc|"
+        r"force[ \-]?field|"
+        r"trajectory|"
+        r"microcanonical|canonical|grand[ \-]?canonical"
+        r")\b",
+        re.IGNORECASE | re.UNICODE,
+    )
+
+    # ------------------------------------------------------------------
+    # Formula / equation cues (math symbols + domain keywords)
+    # ------------------------------------------------------------------
+    _FORMULA_CUE_RE = re.compile(
+        r"(?:"
+        r"equation|formula|expression|"
+        r"potential(?!\s+energy)|"   # "potential energy" caught by entity regex
+        r"hamiltonian|lagrangian|"
+        r"partition[ \-]?function|"
+        r"deriv(?:ative)?|integral|"
+        r"function\s+of|"
+        r"[∂∫∑∇∆Σ×·±≈≡∝∼]"
+        r")",
+        re.IGNORECASE | re.UNICODE,
+    )
+
+    # ------------------------------------------------------------------
+    # Intent → (intent_label, bm25_weight, faiss_weight)
+    # ------------------------------------------------------------------
+    _WEIGHTS: Dict[str, tuple] = {
+        "exact_formula":     ("exact_formula",     0.75, 0.25),
+        "exact_match":       ("exact_match",       0.65, 0.35),
+        "formula_search":    ("formula_search",    0.70, 0.30),
+        "definition_lookup": ("definition_lookup", 0.50, 0.50),
+        "methodology":       ("methodology",       0.35, 0.65),
+        "comparison":        ("comparison",        0.30, 0.70),
+        "exploratory":       ("exploratory",       0.45, 0.55),
+    }
+
+    def __init__(self, default_weights: Optional[Dict] = None) -> None:
+        self._default_weights = default_weights or {
+            "bm25_weight": 0.45,
+            "faiss_weight": 0.55,
+            "intent": "exploratory",
+            "reason": "Default exploratory weights",
         }
-        
-        if self.device == 'cuda':
-            print(f"   Router will use GPU: {torch.cuda.get_device_name(0)}")
-        else:
-            print("   Router will use CPU")
-    
-    def _load(self):
-        """Lazy load model to save memory."""
-        if self.model is None:
-            print(f"   Loading {self.model_name} for query routing...")
-            
-            self.tokenizer = AutoTokenizer.from_pretrained(
-                self.model_name,
-                trust_remote_code=True
-            )
-            
-            self.model = AutoModelForCausalLM.from_pretrained(
-                self.model_name,
-                torch_dtype=torch.float16 if self.device == 'cuda' else torch.float32,
-                device_map="auto" if self.device == 'cuda' else None,
-                trust_remote_code=True
-            )
-            
-            if self.device == 'cpu':
-                self.model = self.model.to(self.device)
-            
-            print(f"  ✅ Router model loaded on {self.device}")
-    
-    def route(self, query: str) -> Dict[str, any]:
+
+    # ------------------------------------------------------------------
+    # Public API — same signature as the old Qwen-based router
+    # ------------------------------------------------------------------
+
+    def route(self, query: str) -> Dict[str, object]:
         """
-        Analyze query and determine optimal search weights.
-        
-        Args:
-            query: User query string
-            
+        Analyze *query* and return optimal BM25 / FAISS weights.
+
         Returns:
             {
-                "bm25_weight": float (0.0-1.0),
-                "faiss_weight": float (0.0-1.0),
-                "intent": str (category),
-                "reason": str (explanation)
+                "bm25_weight": float,
+                "faiss_weight": float,
+                "intent": str,
+                "reason": str,
             }
         """
-        self._load()
-        
-        prompt = self._build_prompt(query)
-        
         try:
-            # Tokenize
-            inputs = self.tokenizer(prompt, return_tensors="pt")
-            
-            if self.device == 'cuda':
-                inputs = inputs.to(self.device)
-            
-            # Generate
-            with torch.no_grad():
-                outputs = self.model.generate(
-                    **inputs,
-                    max_new_tokens=200,
-                    temperature=0.1,  # Low temperature for consistency
-                    do_sample=False,  # Deterministic
-                    pad_token_id=self.tokenizer.eos_token_id
-                )
-            
-            # Decode
-            response = self.tokenizer.decode(outputs[0], skip_special_tokens=True)
-            
-            # Parse JSON from response
-            weights = self._parse_response(response)
-            
-            # Validate
-            self._validate_weights(weights)
-            
-            return weights
-            
-        except Exception as e:
-            print(f"  ⚠️ Router failed: {e}")
-            print(f"  ↪️ Using fallback weights")
-            return {
-                **self.default_weights,
-                "reason": f"Router error: {str(e)[:100]}"
-            }
-    
-    def _build_prompt(self, query: str) -> str:
-        """
-        Construct prompt for weight determination.
-        
-        Args:
-            query: User query
-            
-        Returns:
-            Formatted prompt string
-        """
-        return f"""You are a search query analyzer. Output ONLY valid JSON, nothing else.
+            return self._route(query)
+        except Exception as exc:
+            logger.warning(f"SearchRouter fallback ({exc}): {query!r}")
+            return {**self._default_weights, "reason": f"Router error: {exc}"}
 
-Query: "{query}"
+    # ------------------------------------------------------------------
+    # Internal
+    # ------------------------------------------------------------------
 
-Intent Categories:
-- exact_match: Specific terms/acronyms/definitions
-- semantic_search: Conceptual/exploratory questions  
-- definition_lookup: "What is X?" queries
-- comparison: "Compare X and Y" queries
-- methodology: "How does X work?" queries
+    def _route(self, query: str) -> Dict[str, object]:
+        has_entity = bool(self._PHYSICS_ENTITY_RE.search(query))
 
-Examples of CORRECT output:
+        # spaCy NER catches author names (Nosé, Hoover) that the regex misses
+        if not has_entity:
+            try:
+                ents = extract_entities(query)
+                has_entity = any(e["label"] in ("PERSON", "ORG") for e in ents)
+            except Exception:
+                pass  # spaCy model not loaded — continue without it
 
-Query: "What is protein folding?"
-{{"bm25_weight": 0.5, "faiss_weight": 0.5, "intent": "definition_lookup", "reason": "Query asks for definition of specific term"}}
+        has_formula_cue = bool(self._FORMULA_CUE_RE.search(query))
 
-Query: "How do proteins fold in cells?"
-{{"bm25_weight": 0.3, "faiss_weight": 0.7, "intent": "methodology", "reason": "Query explores process and mechanism"}}
+        # --- Priority cascade ---
+        if has_entity and has_formula_cue:
+            key = "exact_formula"
+            reason = "Physics entity + formula cue → exact formula lookup"
+        elif has_entity:
+            key = "exact_match"
+            reason = "Physics named entity → BM25-weighted term matching"
+        elif has_formula_cue:
+            key = "formula_search"
+            reason = "Formula/equation cue → BM25-weighted formula search"
+        else:
+            nlp_type = classify_query(query)
+            key = {
+                "definition":  "definition_lookup",
+                "methodology": "methodology",
+                "comparison":  "comparison",
+                "exploratory": "exploratory",
+            }.get(nlp_type, "exploratory")
+            reason = f"NLP classification: {nlp_type}"
 
-Query: "Compare classical MD with quantum MD"
-{{"bm25_weight": 0.3, "faiss_weight": 0.7, "intent": "comparison", "reason": "Query compares two methodologies"}}
-
-Query: "MD simulation acronym"
-{{"bm25_weight": 0.8, "faiss_weight": 0.2, "intent": "exact_match", "reason": "Query seeks specific acronym definition"}}
-  
-CRITICAL RULES:
-1. Output ONLY the JSON object
-2. NO explanatory text before or after
-3. Weights MUST sum to 1.0
-4. Use double quotes for strings
-5. Numbers must be between 0.0 and 1.0
-
-Now analyze this query and output ONLY JSON:
-{query}
-
-JSON:"""
-    
-    def _parse_response(self, response: str) -> Dict[str, any]:
-        """
-        Extract JSON from model response.
-        
-        Args:
-            response: Raw model output
-            
-        Returns:
-            Parsed weight dictionary
-        """
-        # Find JSON block in response
-        # Look for { ... } pattern
-        json_match = re.search(r'\{[^}]+\}', response, re.DOTALL)
-        
-        if not json_match:
-            raise ValueError("No JSON object found in response")
-        
-        json_str = json_match.group(0)
-        
-        # Parse JSON
-        weights = json.loads(json_str)
-        
-        return weights
-    
-    def _validate_weights(self, weights: Dict[str, any]):
-        """
-        Validate weight dictionary.
-        
-        Args:
-            weights: Parsed weights
-            
-        Raises:
-            ValueError if validation fails
-        """
-        # Check required keys
-        required = ["bm25_weight", "faiss_weight", "intent", "reason"]
-        for key in required:
-            if key not in weights:
-                raise ValueError(f"Missing required key: {key}")
-        
-        # Check weight ranges
-        bm25 = weights["bm25_weight"]
-        faiss = weights["faiss_weight"]
-        
-        if not (0.0 <= bm25 <= 1.0):
-            raise ValueError(f"bm25_weight out of range: {bm25}")
-        
-        if not (0.0 <= faiss <= 1.0):
-            raise ValueError(f"faiss_weight out of range: {faiss}")
-        
-        # Check sum (allow small floating point error)
-        total = bm25 + faiss
-        if not (0.95 <= total <= 1.05):
-            raise ValueError(f"Weights don't sum to ~1.0: {total}")
-        
-        # Normalize to exactly 1.0
-        weights["bm25_weight"] = bm25 / total
-        weights["faiss_weight"] = faiss / total
+        intent, bm25, faiss = self._WEIGHTS[key]
+        result = {
+            "bm25_weight": bm25,
+            "faiss_weight": faiss,
+            "intent": intent,
+            "reason": reason,
+        }
+        logger.debug(f"Router: intent={intent} bm25={bm25} faiss={faiss} | {query!r}")
+        return result

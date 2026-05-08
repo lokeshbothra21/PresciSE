@@ -1,12 +1,26 @@
 lexical:
   enabled: true
-  top_k: 10
+  top_k: 15
+  weight: 0.6
 
 semantic:
   enabled: true
+  top_k: 15
+  embedding_model: "allenai/specter"
+  weight: 0.4
+
+router:
+  enabled: true
+  model: "Qwen/Qwen2.5-1.5B-Instruct"
+  fallback_bm25_weight: 0.6
+  fallback_faiss_weight: 0.4
+
+formula:
+  enabled: true
   top_k: 10
-  embedding_model: "sentence-transformers/all-MiniLM-L6-v2"
+  weight: 0.5
+  similarity_threshold: 0.15
 
 reranking:
-  enabled: true
+  enabled: false
   top_k: 5

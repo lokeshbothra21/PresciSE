@@ -88,8 +88,8 @@ class ScientificAnswerAgent:
         """
         retrieved_chunks = state["retrieved_chunks"]
         blocks = []
-        
-        for item in retrieved_chunks:
+
+        for rank, item in enumerate(retrieved_chunks, start=1):
             chunk = item["chunk"]
             # Extract doc_id and page numbers from chunk
             doc_id = chunk.get("doc_id", "unknown")
@@ -97,7 +97,21 @@ class ScientificAnswerAgent:
             # Use first page number if available
             page_num = pages[0] if pages and pages[0] > 0 else "unknown"
             citation = f"[{doc_id}, page {page_num}]"
-            blocks.append(f"{citation} {chunk['text']}")
+
+            # For formula chunks, prefer the stored LaTeX formula for display.
+            # Falls back to the .text field (which already contains [FORMULA]...).
+            if chunk.get("chunk_type") == "formula":
+                latex = chunk.get("latex_formula", "")
+                if latex:
+                    context = chunk.get("context_text", "")
+                    formula_line = f"[FORMULA]${latex}$[/FORMULA]"
+                    text = f"{formula_line}\nContext: {context}" if context else formula_line
+                else:
+                    text = chunk.get("text", "")
+            else:
+                text = chunk.get("text", "")
+
+            blocks.append(f"[Evidence {rank}] {citation}\n{text}")
         
         state["formatted_evidence"] = "\n\n".join(blocks)
         return state
@@ -151,10 +165,59 @@ class ScientificAnswerAgent:
         
         return result["final_answer"]
 
+    def answer_enhanced(
+        self,
+        query: str,
+        enhancement: Dict[str, Any],
+        retrieved_chunks: List[Dict[str, Any]],
+    ) -> str:
+        """
+        Generate answer using sub-query enhanced retrieval results.
+
+        Formats evidence via the same node used by the standard workflow,
+        then passes the result to the enhanced prompt builder which incorporates
+        sub-query context and strict grounding rules.
+
+        Args:
+            query: Original user query
+            enhancement: Output of enhance_query() — contains "type", "subqueries", etc.
+            retrieved_chunks: Merged results from main query + all subqueries
+
+        Returns:
+            Generated answer string
+        """
+        from core.agent.prompts import build_enhanced_prompt
+
+        # Reuse the format-evidence node to produce citation blocks
+        initial_state: AgentState = {
+            "query": query,
+            "retrieved_chunks": retrieved_chunks,
+            "formatted_evidence": "",
+            "final_answer": "",
+        }
+        state = self._format_evidence_node(initial_state)
+        evidence = state["formatted_evidence"]
+
+        # Identify subqueries that had no matching evidence (heuristic: first 30 chars)
+        retrieved_texts = [item["chunk"].get("text", "") for item in retrieved_chunks]
+        unfulfilled = [
+            sq for sq in enhancement.get("subqueries", [])
+            if not any(sq[:30].lower() in t.lower() for t in retrieved_texts)
+        ]
+
+        prompt = build_enhanced_prompt(
+            main_query=query,
+            subqueries=enhancement.get("subqueries", []),
+            evidence_blocks=evidence,
+            enhancement_type=enhancement.get("type", "exploratory"),
+            unfulfilled_subqueries=unfulfilled,
+        )
+        return self.llm.generate(prompt)
+
     def get_workflow_graph(self):
         """
         Get visual representation of the workflow (for debugging).
-        
+
         Returns:
             Graph object that can be visualized
         """

@@ -1,0 +1,100 @@
+Total Verlet chunks: 98
+
+[  0] Computer "Experiments" on Classical Fluids. I. Thermodynamical Properties of Lennard-Jones Molecules*
+[  1] [TINY] LOUP VERLET↑
+[  2] Belfer Graduate School of Science, Yeshiva University, New York, Nerw York (Received30January 1967)
+[  3] The equation of motion of a system of 864particles interacting through a Lennard-Jones potential has been integrated forvarious values of thetemperature and density,relative,genera
+[  4] [TINY] I.INTRODUCTION
+[  5] HE "exact" machine computations relative to classical fuids have several aims: It is possible to realize "experiments"in which the intermolecular forces are known; approximative th
+[  6] TheMonte Carlo method initiated by theLos Alamos group1 is a first example of these "exact" methods. It amountstoadirectcomputationoftheintegralsinvolved in the canonical averages.
+[  7] The dynamics of an isolated system can also be considered andused to calculate time averages and time-dependent properties. The case of hard spheres and hard spheres surrounded by 
+[  8] In Sec. II we give some technical details on the method which we use; in particular, we describe a bookkeeping device that cuts the computing time by a factor of the order of 10.
+[  9] In Sec. III we give and discuss the results obtained for the pressure, the internal energy, the high-frequency elastic moduli, and the isotopic separation factor. These
+[ 10] * Supported by the U. S. Air Force Office of Scientific Research GrantNo.508-66.
+[ 11] 1 W.W.Wood and F.R.Parker, J. Chem.Phys.27,720 (1957). 2B.J.Alder and T.E.Wainwright,J. Chem.Phys.33,1439 (1960).
+[ 12] ↑Permanent address:Faculte des Sciences,Laboratoire de Physique Theorique et Hautes Energies,Batiment 211, 91-Orsay.
+[ 13] 3 A.Rahman,Phys.Rev.136,A405 (1964).
+[ 14] results,summarizedinTableI,aresufficientlynumerous to allow a comparison on the whole density range of the fuid state and on a wide temperature range which essentiallyexcludesthe e
+[ 15] The correlationfunctions are described and discussed in a separate paper.4 The formalism necessary to express thefuctuations in the microcanonical ensemble was discussed recently.5
+[ 16] The results on the time-dependent properties will be reported later.
+[ 17] II.DESCRIPTIONOFTHECOMPUTER EXPERIMENTS
+[ 18] We consider a system of 864particles,enclosed in a cube of side L,with periodic boundary conditions interacting throughatwo-bodypotential of the Lennard-Jones type
+[ 19] This potential is cut at r,= 2.5o in most of our experiments, or, in some of them at r, =3.3o. The problem is tointegratethe equation of motion
+[ 20] We choose the following units:The lengths are expressed in units of o (o=3.405 A for argon), and the energies in units of e (e=119.8°K for argon).7 The thermodynamicquantitieswill 
+[ 21] [TINY] 4L.Verlet (to be published).
+[ 22] 6j. L. Lebowitz, J. K. Percus, and L. Verlet, Phys. Rev. 153, 250 (1967):
+[ 23] 5 J. L.Lebowitz and J. K.Percus, Phys.Rev.124,1673 (1961).
+[ 24] 7A.Michels and H.Wijker,Physica 15, 627 (1949).
+[ 25] usual"reduced"units.The time unit is chosen so that m=48eo-²;it turns out to be,for argon, equal to 3X10-13 sec.This time is of the order of the kinetic relaxation times of the sys
+[ 26] To integrate (2), we use the very simple algorithm
+[ 27] whereh is thetime incrementwhichwe take equal to 0.032. This is practically the value chosen by Rahman (i.e., 10-14 sec in the case of argon). We have checked that this time increm
+[ 28] we must, at each step, compute N(N—-1) terms,most of which turn out to be zero. We introduce the following bookkeeping device8 which cuts the computing time by a factor of the orde
+[ 29] locity in our units, it is typically of the order of 0.3;if this is so,no error is made as long as
+[ 30] With this device,the time spent for an integration step atthe density 0.45is about12 secontheUNIVAC 1107 of the Faculté des Sciences, Orsay, where the first calculations were made,
+[ 31] With that machine, a typical "experiment" takes about 1 h. It goes as follows: The positions are initially taken, in general, at the nodes of a face-centered-cubic lattice which ha
+[ 32] osities, heat conductivity, etc.). The necessary technical details will be given when these results are reported.
+[ 33] [TINY] III. THERMODYNAMIC QUANTITIES
+[ 34] [TINY] A.Temperature
+[ 35] At each step intime the velocities are calculated simplyby theformula
+[ 36] The temperature is, at time t, ? of the kinetic energy, in our units
+[ 37] The error entailed by the use of (6) is of the order of 1/1000. This error is of no consequence, except that it gives rise to small irregularities in the total energy whichshouldbe
+[ 38] If, for instance n=16, nvh=0.15. By choosing rM=3.3 for r,=2.5,the condition (5) is largely met,and at the have checked, by following some systems for several hundred steps in time
+[ 39] 8Some time-saving tricks have been considered before: See Ref.2 and,for the hard-sphere case,A.Rotenberg [New York University Report No. NYO-1480-3,1964 (unpublished)].
+[ 40] [TINY] B. Pressure
+[ 41] Thepressure is calculatedfrom thevirial theorem
+[ 42] The second term of (8) is the time average of the virial. The last term is a correction term which takes into account the effect onthe pressure of the tail of the potential which h
+[ 43] The influence on the main term of (8)of the tail of the potential,which has been neglected in the dynamics canbe appreciated by considering that cutoff tail as a
+[ 44] TABLE I.List of thermodynamical results:p is the particle density,andTthetemperature;βp/pisthe compressibilityfactor, Ω²isequaltoV2V>/m,KandGaretheinfinite-frequencybulk and shearm
+[ 45] weak long-range perturbation.? The effect on the main term of (8) is quite small:It amounts to 0.006 in the one case studied (p=0.75, T=1.05).It is smaller than thestatisticalerror
+[ 46] The replacement of g(r)by 1 in the correction term leads, for r,=2.5, to an error which may reach 0.05 at thehighest density and lowest temperature considered here.Such a replaceme
+[ 47] As a whole,we believe that the over-all error on p/pkT is probably of the order of 0.01 around the critical density and may reach 0.05 in the high-density and low-temperatureregion
+[ 48] The results so far obtained have been gathered in Table I. Fig. 1 shows p/pkT for some isochores at high
+[ 49] 9J.Lebowitz (private communication).
+[ 50] FIG.1. The compressibility factor βp/p as a function of β for the isochores p=0.88, 0.85,0.75,0.65, and 0.45 (solid lines),as compared with the experimental data for argon (Refs.10
+[ 51] density (o=0.88,0.85,0.75,0.65, and 0.45),and the comparison oftheequation of state determinedbyvariousexperimental l groups in Amsterdam,7,10 Toronto,11 and Louvain.12
+[ 52] The over-all agreementbetween"theory"and experimentis surprising good:It appears that theLennardJones potentialis a quite satisfactoryinteraction as far as the equilibrium properti
+[ 53] On Fig. 2 are represented three isotherms: One at hightemperature(T=2.74)where comparisoncanbe made with the results obtained a long time ago by Wood and Parker,2 and also with a L
+[ 54] 10 J.M.H.Levelt,Physica 26,361 (1960).
+[ 55] 12 A. Van Itterbeck,O.Verbeke, and K. Staes, Physica 29, 742 (1963).
+[ 56] 11W. Van Witzenburg,University of Torontodissertation (unpublished);copy available inDissertationAbstracts 25,1268 (1964).
+[ 57] F1G.2.For the isotherms T=2.74,T=1.35,and T=1,βp is represented as a function of p.Thelow-densityparts of thecurves wereobtainedwiththehelpofthePYandPYIIequations (Ref.13).The arro
+[ 58] putations have been made.13 That isotherm will be used below to examine the question of the critical constants.
+[ 59] For low values of the pressure, our computation may describe metastable states: The periodic boundary prevents the occurrence of inhomogeneities of a size larger than the side of t
+[ 60] aised until"melting"occurs. Our criterion14 for melting is based on the evolution in time of pk=Z:coskx: There k corresponds to the smallest vector of the reciprocal lattice,i.e.,k
+[ 61] 13 D. Levesque and L. Verlet, Physica (to be published).
+[ 62] 14 P.Nozieres (private communication).
+[ 63] unit cell of the original fcc lattice, which, in the x direction extends from O to L. For a solid, pk is of the order of N.It oscillates around O with an amplitude of the order of 
+[ 64] place for T=0.82 at that density. The agreement with experiment is seen to be good.
+[ 65] [TINY] C.Critical Constants
+[ 66] Because of computational errors,the precise determination of the critical constants is difficult.We believe,however,that a careful examination of the data warrants the following di
+[ 67] (a)The extrapolation of the isochorestowards the critical temperature yields results which are in good agreement with the Monte Carlo results of Levesque and Verlet13 (108 particle
+[ 68] (b）The PY II equation leads at p=0.45 and p=0.5 to values ofβp/pwhich aredefinitely toolow.The trend togivetoolow values for the quantities atintermediate densityis alreadynoticeab
+[ 69] TABLE II.Values of βp/p for the isotherm T=1.35 obtained from thePY andPYIIequations(Ref.13),Monte Carlo computations(M.C.)(Ref.i3),extrapolationofthe molecular dynamics (M.D.)resu
+[ 70] TABLE III. Values of βp/p, of the inverse compressibility (Ref.4),and of the interaction part of theintegral as given by the molecular dynamics (M.D.),thePYI1,and thePYequation for
+[ 71] (c)Thefive virial series15gives values of βp/pwhich are clearly too high by 0.015 at p=0.3,by 0.05 at p=0.35,andby0.06atp=0.4.Thedifferencethen diminishes and changes sign at high 
+[ 72] their series is situated at T。=1.29, pe=0.26, and βepc/pc=0.35.The critical density is quite low,a consequenceofthetoolowpressuresatintermediate densities.
+[ 73] (d) Table IV summarizes the situation:There a comparison with experiment on argon is made, which shows that there exists a discrepancy of at least 5% on the critical temperature. T
+[ 74] y-body forces.Even at density around the critical region, a relatively large amount of those forces would be needed.It appears that these many-body forces
+[ 75] TABLEIV.Critical constants obtainedfrom thePYIIequation (Ref.13),from the PYIIequationcorrectedas explained in Sec. III.A, from the 5-term virial series (Ref.15) and from experimen
+[ 76] 15 J. A. Barker, P. J. Leonard, and A. Pompe, J. Chem. Phys. 44, 4266 (1966).
+[ 77] J. A. Barker, W. Fock, and F. Smith, Phys. Fluids 7, 429 (1964).
+[ 78] 16 E.A. Guggenheim and M.C.McGlasham,Proc.Roy.Soc. (London) 225A,456 (1960);R.J.Munn and J.Alder,J.Chem. Phys. 43, 3998'(1965); J. Rowlinson, Discussions Faraday Soc. 40, 19 (1965)
+[ 79] 18 D. Levesque and J. Vieillard-Baron (to be published).
+[ 80] should then manifest themselvesinthe form of an interaction which is clearly state dependent at high density; and this seems to be contradicted by the excellence ofthefitobtainedin
+[ 81] [TINY] D. Internal Energies
+[ 82] Thepart of theinternalenergydue to theinteraction U is calculated as the time average of the sum of the interparticle interaction energies. A tail correction is included, as for th
+[ 83] nes potential is slightly too deep.
+[ 84] E.High-Frequency Elastic Moduli
+[ 85] Zwanzig and Mountain19 have shown that in simple fuids the infinite-frequency bulk modulus K。and the infinite-frequency shearmodulus G。canbe expressed in terms of the radial distri
+[ 86] Results for Ko, Gx, and the ratio Kα/Ga are given in Table I. When the temperature is low, the internalenergy effects predominate and K。/G。 is near (5/3), thevalue obtainedfrom Cau
+[ 87] We may compare the"exact results" given in Table I with those obtained by Zwanzig and Mountainwho used (9) and (10), and the experimental data of Levelt,10 supposing that the inter
+[ 88] [TINY] F.IsotopicSeparationFactor
+[ 89] The separation faction in a liquid-gas mixture of isotopes of argon can be expressed?0 in terms of the
+[ 90] 10 R. Zwanzig and R. D. Mountain, J. Chem. Phys. 43, 4464 (1965).
+[ 91] 20 G. Casanova, A. Levi, and N. Terzi, Physica 30, 937 (1964).
+[ 92] F1G.3.The solid lines show thequantityC=Ω/2πpm ={△²V)/96πp for theisochores p=0.85,p=0.75,andp=0.65,as afunctionofβ.Thecrossesrepresenttheinterceptsofthose isochores with the exper
+[ 93] average value of the Laplacian of the potential(V2V(r)). The quantity Ω²= (1/M)(V2V(r)), which is also important in the time development of the system,has been calculated,and the v
+[ 94] [TINY] IV.CONCLUSIONS
+[ 95] We have shown, using Rahman's work as a starting point, how it is possible to integrate the equations of motion of about a thousandparticles in a relatively easy way. The first app
+[ 96] [TINY] ACKNOWLEDGMENTS
+[ 97] The author isvery grateful for the hospitality of Yeshiva University where most of this work was done. It is a particular pleasure to thank Professor Joel L. Lebowitz; numerous lon

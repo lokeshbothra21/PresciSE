@@ -2,6 +2,7 @@ from typing import List, Optional
 from sentence_transformers import SentenceTransformer
 import torch
 import warnings
+from loguru import logger
 
 # Suppress transformers generation warnings (not relevant for embeddings)
 warnings.filterwarnings("ignore", category=UserWarning, module="transformers.generation.configuration_utils")
@@ -26,16 +27,16 @@ class Embedder:
         self._model: Optional[SentenceTransformer] = None
         
         if self.device == 'cuda':
-            print(f"  🎮 GPU detected! Using {torch.cuda.get_device_name(0)}")
+            logger.info(f"GPU detected! Using {torch.cuda.get_device_name(0)}")
         else:
-            print("  💻 No GPU detected, using CPU")
+            logger.info("No GPU detected, using CPU")
 
     def _load(self):
         """Lazy load the model to save memory."""
         if self._model is None:
-            print(f"  📥 Loading {self.model_name} on {self.device}...")
+            logger.info(f"Loading {self.model_name} on {self.device}...")
             self._model = SentenceTransformer(self.model_name, device=self.device)
-            print(f"  ✅ Model loaded (embedding dim: {self._model.get_sentence_embedding_dimension()})")
+            logger.info(f"Model loaded (embedding dim: {self._model.get_sentence_embedding_dimension()})")
 
     def embed_text(self, text: str) -> List[float]:
         """

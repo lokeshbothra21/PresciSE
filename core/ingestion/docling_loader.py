@@ -1,60 +1,136 @@
 import logging
-import sys
 import os
 
-# Configure logging to suppress output from docling and its dependencies
-# Use a NullHandler to prevent "No handlers found" warnings
-logging.basicConfig(
-    level=logging.CRITICAL,
-    handlers=[logging.NullHandler()],
-    force=True
+# ---------------------------------------------------------------------------
+# Compatibility shim: timm 0.5.4 (required by nougat-ocr) is missing
+# ImageNetInfo, which transformers>=4.46 tries to import via its timm_wrapper
+# module.  Adding a stub prevents the lazy-import failure that would otherwise
+# crash docling's layout pipeline at first use.
+# ---------------------------------------------------------------------------
+try:
+    import timm.data as _timm_data
+    if not hasattr(_timm_data, "ImageNetInfo"):
+        class _ImageNetInfoStub:
+            """Stub for timm>=0.6 ImageNetInfo (not present in timm 0.5.4)."""
+            def __init__(self, *a, **kw): pass
+        _timm_data.ImageNetInfo = _ImageNetInfoStub
+    if not hasattr(_timm_data, "infer_imagenet_subset"):
+        _timm_data.infer_imagenet_subset = lambda *a, **kw: None
+except Exception:
+    pass
+
+from docling.backend.docling_parse_v4_backend import DoclingParseV4DocumentBackend
+from docling.datamodel.base_models import InputFormat
+from docling.datamodel.pipeline_options import PdfPipelineOptions, VlmPipelineOptions
+from docling.document_converter import (
+    DocumentConverter,
+    FormatOption,
+    PdfFormatOption,
 )
-
-# Set all relevant loggers to CRITICAL to suppress their output
-for logger_name in ["docling", "pdfminer", "pypdf", "pypdfium2", "rapidocr", "RapidOCR"]:
-    logger = logging.getLogger(logger_name)
-    logger.setLevel(logging.CRITICAL)
-    logger.addHandler(logging.NullHandler())
-    logger.propagate = False
-
-from docling.document_converter import DocumentConverter
 from docling.exceptions import ConversionError
+from docling.pipeline.vlm_pipeline import VlmPipeline
+
+# Suppress noisy logs from docling internals.
+logging.basicConfig(level=logging.CRITICAL, handlers=[logging.NullHandler()], force=True)
+for logger_name in ["docling", "pdfminer", "pypdf", "pypdfium2", "rapidocr", "RapidOCR"]:
+    _logger = logging.getLogger(logger_name)
+    _logger.setLevel(logging.CRITICAL)
+    _logger.addHandler(logging.NullHandler())
+    _logger.propagate = False
 
 
-def load_with_docling(pdf_path: str):
+def _apply_device_policy(prefer_gpu: bool = True) -> None:
     """
-    Extracts structured content from a PDF using Docling.
-    Returns Docling conversion result object.
+    Best-effort device policy for Docling subprocess execution.
     """
-    # Suppress output at OS level to prevent pypdfium2 from printing raw PDF debug output
-    # This is necessary because pypdfium2 writes directly to file descriptors
-    stdout_fd = sys.stdout.fileno()
-    stderr_fd = sys.stderr.fileno()
-    
-    with open(os.devnull, 'w') as devnull:
-        old_stdout_fd = os.dup(stdout_fd)
-        old_stderr_fd = os.dup(stderr_fd)
-        os.dup2(devnull.fileno(), stdout_fd)
-        os.dup2(devnull.fileno(), stderr_fd)
-        conversion_error = None
-        result = None
-        try:
-            converter = DocumentConverter()
-            result = converter.convert(pdf_path)
-        except ConversionError as e:
-            # Capture the error but don't let it print with raw PDF data
-            conversion_error = e
-        finally:
-            # Restore stdout and stderr
-            os.dup2(old_stdout_fd, stdout_fd)
-            os.dup2(old_stderr_fd, stderr_fd)
-            os.close(old_stdout_fd)
-            os.close(old_stderr_fd)
-    
-    # Re-raise with clean message if there was an error
-    if conversion_error:
-        import os as os_module
-        filename = os_module.path.basename(pdf_path)
-        raise ConversionError(f"Failed to convert PDF: {filename}. The PDF may be malformed or missing required metadata.") from None
-    
+    if prefer_gpu:
+        os.environ.pop("CUDA_VISIBLE_DEVICES", None)
+        os.environ.pop("DOCLING_DEVICE", None)
+    else:
+        os.environ["CUDA_VISIBLE_DEVICES"] = ""
+        os.environ["DOCLING_DEVICE"] = "cpu"
+
+
+def load_with_docling(pdf_path: str, prefer_gpu: bool = True):
+    """
+    Extract structured content from a PDF using the standard Docling pipeline.
+
+    Formula/code enrichment is disabled by default for runtime stability.
+    """
+    try:
+        _apply_device_policy(prefer_gpu=prefer_gpu)
+        pipeline_options = PdfPipelineOptions()
+        enable_formula_enrichment = os.getenv("PRESCISE_ENABLE_FORMULA_ENRICHMENT", "0") == "1"
+        enable_code_enrichment = os.getenv("PRESCISE_ENABLE_CODE_ENRICHMENT", "0") == "1"
+        pipeline_options.do_formula_enrichment = enable_formula_enrichment
+        pipeline_options.do_code_enrichment = enable_code_enrichment
+
+        converter = DocumentConverter(
+            format_options={"pdf": PdfFormatOption(pipeline_options=pipeline_options)}
+        )
+        result = converter.convert(pdf_path)
+    except ConversionError:
+        filename = os.path.basename(pdf_path)
+        raise ConversionError(
+            f"Failed to convert PDF: {filename}. "
+            "The PDF may be malformed or missing required metadata."
+        ) from None
+
+    return result.document
+
+
+def load_with_docling_ocr_aggressive(pdf_path: str, prefer_gpu: bool = True):
+    """
+    OCR-focused fallback path for glyph-rendered math where text extraction is weak.
+    """
+    try:
+        _apply_device_policy(prefer_gpu=prefer_gpu)
+        pipeline_options = PdfPipelineOptions()
+        pipeline_options.do_ocr = True
+        pipeline_options.do_formula_enrichment = (
+            os.getenv("PRESCISE_ENABLE_FORMULA_ENRICHMENT", "0") == "1"
+        )
+        pipeline_options.do_code_enrichment = False
+
+        if getattr(pipeline_options, "ocr_options", None) is not None:
+            setattr(pipeline_options.ocr_options, "force_full_page_ocr", True)
+
+        converter = DocumentConverter(
+            format_options={"pdf": PdfFormatOption(pipeline_options=pipeline_options)}
+        )
+        result = converter.convert(pdf_path)
+    except Exception as e:
+        filename = os.path.basename(pdf_path)
+        raise ConversionError(
+            f"OCR fallback conversion failed for PDF: {filename}. Error: {e}"
+        ) from None
+
+    return result.document
+
+
+def load_with_docling_vlm(pdf_path: str, prefer_gpu: bool = True):
+    """
+    Extract content from a PDF using Docling VLM pipeline (Granite Docling).
+
+    This is a fallback path for pages/documents with poor formula coverage.
+    """
+    try:
+        _apply_device_policy(prefer_gpu=prefer_gpu)
+        vlm_options = VlmPipelineOptions()
+        converter = DocumentConverter(
+            format_options={
+                InputFormat.PDF: FormatOption(
+                    pipeline_cls=VlmPipeline,
+                    backend=DoclingParseV4DocumentBackend,
+                    pipeline_options=vlm_options,
+                )
+            }
+        )
+        result = converter.convert(pdf_path)
+    except Exception as e:
+        filename = os.path.basename(pdf_path)
+        raise ConversionError(
+            f"VLM fallback conversion failed for PDF: {filename}. Error: {e}"
+        ) from None
+
     return result.document

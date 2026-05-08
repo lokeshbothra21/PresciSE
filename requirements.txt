@@ -26,6 +26,11 @@ peft  # Required for SPECTER2 PEFT adapters
 
 # Document processing
 docling
+pymupdf
+Pillow>=10.0.0
+
+# VLM formula scanning (Nougat)
+nougat-ocr>=0.1.17
 
 # API & CLI
 fastapi

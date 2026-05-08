@@ -24,7 +24,7 @@ class GeminiClient:
     Rate Limit: 10 requests per minute to conserve API quota.
     """
 
-    def __init__(self, model_name: str = "gemini-2.5-flash", temperature: float = 0.2):
+    def __init__(self, model_name: str = "gemini-2.5-flash-lite", temperature: float = 0.2):
         """
         Initialize Gemini LLM with LangChain and rate limiting.
         
@@ -106,11 +106,15 @@ class GeminiClient:
             )
         
         try:
-            # Enforce rate limit before making request
-            self._wait_for_rate_limit()
-            
             # LangChain invoke returns AIMessage object
             response = self.llm.invoke(prompt)
-            return response.content
+            content = response.content
+            # Newer Gemini models may return content as a list of parts
+            if isinstance(content, list):
+                content = " ".join(
+                    part if isinstance(part, str) else part.get("text", "")
+                    for part in content
+                )
+            return content
         except Exception as e:
             return f"Error generating response: {e}"

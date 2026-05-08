@@ -4,7 +4,7 @@ from typing import List
 def tokenize(text: str) -> List[str]:
     """
     Basic scientific-safe tokenizer.
-    Preserves symbols, numbers, and abbreviations.
+    Preserves symbols, numbers, and abbreviations, including Unicode Greek letters.
     """
-    tokens = re.findall(r"[A-Za-z0-9\-\_\.]+", text)
-    return tokens
+    tokens = re.findall(r"[\w\-\.]+", text, re.UNICODE)
+    return [t for t in tokens if any(c.isalnum() for c in t)]

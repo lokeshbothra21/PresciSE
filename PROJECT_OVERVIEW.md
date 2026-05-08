@@ -294,6 +294,30 @@ PresciSE/
 
 ---
 
+## ⚠️ Development Guidelines
+
+**CRITICAL RULE: Scripts Folder Usage**
+The `scripts/` directory is **STRICTLY for testing, demonstrations, and entry points**.
+
+- **DO NOT** implement core business logic, algorithms, or reusable classes in `scripts/`.
+- **DO NOT** make important architectural changes in `scripts/`.
+- ALL core functionality must reside in the `core/` package.
+- Scripts should only import and orchestrate components from `core/`.
+
+---
+
+## ⚠️ Development Guidelines
+
+**CRITICAL RULE: Scripts Folder Usage**
+The `scripts/` directory is **STRICTLY for testing, demonstrations, and entry points**.
+
+- **DO NOT** implement core business logic, algorithms, or reusable classes in `scripts/`.
+- **DO NOT** make important architectural changes in `scripts/`.
+- ALL core functionality must reside in the `core/` package.
+- Scripts should only import and orchestrate components from `core/`.
+
+---
+
 ## Current Capabilities
 
 ✅ PDF document ingestion (Docling)  
