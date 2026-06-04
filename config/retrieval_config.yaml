@@ -1,3 +1,7 @@
+# NOTE: this file documents the retrieval defaults. They currently live in code
+# (HybridRetriever defaults + core/retrieval/search_router.py); this YAML is not
+# yet loaded at runtime. Keep it in sync if/when config loading is wired up.
+
 lexical:
   enabled: true
   top_k: 15
@@ -10,8 +14,10 @@ semantic:
   weight: 0.4
 
 router:
+  # The query router is a rule-based engine (core/retrieval/search_router.py).
+  # It is NOT an LLM — the earlier Qwen2.5 model was removed.
   enabled: true
-  model: "Qwen/Qwen2.5-1.5B-Instruct"
+  type: "rule-based"
   fallback_bm25_weight: 0.6
   fallback_faiss_weight: 0.4
 

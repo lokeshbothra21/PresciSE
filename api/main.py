@@ -16,6 +16,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import re
 import time
 import uuid
 
@@ -26,11 +27,14 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from fastapi import Depends, FastAPI, HTTPException, Security
+from fastapi import Depends, FastAPI, File, HTTPException, Request, Security, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import APIKeyHeader
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
+
+from core import settings
+from core.persistence import db
 
 # ---------------------------------------------------------------------------
 # ML singletons (populated during lifespan startup)
@@ -44,8 +48,16 @@ _embedder = None
 _nougat_scan_running: bool = False
 _nougat_scan_complete: bool = False
 
-CHAT_HISTORY_DIR = Path("data/chat_history")
-MAX_QUERY_LEN = 512
+MAX_QUERY_LEN = settings.max_query_len()
+
+# Chunks with no owner are visible to everyone; a query allows {user, shared}.
+SHARED_OWNER = "__shared__"
+
+# Uploaded PDFs are stored per user (under the configured data dir).
+UPLOAD_DIR = settings.upload_dir()
+MAX_UPLOAD_BYTES = settings.max_upload_bytes()
+PDF_DIR = settings.pdf_dir()
+INDEX_DIR = settings.index_dir()
 
 
 @asynccontextmanager
@@ -59,18 +71,27 @@ async def lifespan(app: FastAPI):
     from core.agent.context_builder import build_context_description
     from core.embeddings.embedder import Embedder
 
-    CHAT_HISTORY_DIR.mkdir(parents=True, exist_ok=True)
+    db.init_db()  # create tables if missing
+    # A crash during a previous run can leave a document stuck in pending/indexing.
+    n_stuck = db.reconcile_interrupted_documents()
+    if n_stuck:
+        from loguru import logger as _log
+        _log.warning(f"[STARTUP] Marked {n_stuck} interrupted document(s) as failed.")
 
     _embedder = Embedder()
-    _retriever = IndexManager("data/pdfs", "data/index").load_or_build()
+    # Load-only startup: the folder-drop-and-restart model is retired; documents
+    # now enter via POST /api/documents. This loads any persisted index (incl.
+    # previously-uploaded docs) without scanning data/pdfs or rebuilding.
+    _retriever = IndexManager(PDF_DIR, INDEX_DIR).load_only()
     _llm = GeminiClient()
     context_desc = build_context_description(getattr(_retriever, "chunks", []))
     _agent = DDExpertAgent(_retriever, _embedder, _llm, context_desc)
 
-    # Launch Nougat background scanner (non-blocking) unless disabled.
-    # run_in_executor already submits the function to the thread pool and
-    # returns an asyncio.Future — no wrapping needed.
-    if os.getenv("PRESCISE_ENABLE_VLM_BACKGROUND_SCAN", "1") == "1":
+    # Nougat background scanner — OFF by default. It scans the legacy data/pdfs/
+    # folder (not uploads), persists to pickle (not the DB source of truth), and
+    # nougat-ocr is incompatible with transformers 5.x — so it's disabled unless
+    # explicitly enabled. Opt in with PRESCISE_ENABLE_VLM_BACKGROUND_SCAN=1.
+    if os.getenv("PRESCISE_ENABLE_VLM_BACKGROUND_SCAN", "0") == "1":
         loop = asyncio.get_event_loop()
         loop.run_in_executor(None, _run_nougat_scan, _retriever, _embedder)
 
@@ -84,10 +105,22 @@ app = FastAPI(title="PresciSE", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:8000", "http://127.0.0.1:8000"],
+    allow_origins=settings.cors_origins(),
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+@app.middleware("http")
+async def request_id_middleware(request: Request, call_next):
+    """Correlation id: echo an incoming X-Request-ID or mint one, and return it
+    on the response. AURA propagates X-Request-ID, so this threads tracing
+    through cleanly once integrated."""
+    rid = request.headers.get("X-Request-ID") or str(uuid.uuid4())
+    request.state.request_id = rid
+    response = await call_next(request)
+    response.headers["X-Request-ID"] = rid
+    return response
 
 
 # ---------------------------------------------------------------------------
@@ -119,14 +152,6 @@ class QueryResponse(BaseModel):
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
-def _session_file(session_id: str) -> Path | None:
-    """Find the JSONL file for a session_id (searches all date prefixes)."""
-    for f in CHAT_HISTORY_DIR.glob("*.jsonl"):
-        if session_id in f.name:
-            return f
-    return None
-
-
 def _chunk_to_source(item: dict) -> SourceItem:
     chunk = item["chunk"]
     meta = chunk.get("metadata") or {}
@@ -147,37 +172,105 @@ def _chunk_to_source(item: dict) -> SourceItem:
     )
 
 
-def _run_query(query: str) -> tuple[str, list[dict], dict]:
-    """Synchronous ML pipeline — called inside thread pool."""
-    from core.nlp.tokenizer import tokenize
+def _run_query(query: str, allowed_owners: set | None = None, request_id: str = "-") -> tuple[str, list[dict], dict]:
+    """Synchronous ML pipeline — called inside thread pool.
 
-    # Retrieve a representative set of chunks for router_decision metadata
-    tokens = tokenize(query)
-    embedding = _embedder.embed_text(query)
-    main_result = _retriever.retrieve_with_router(
-        query_tokens=tokens,
-        query_embedding=embedding,
-        query_str=query,
-        top_k=12,
-    )
-    router_decision = main_result["router_decision"]
-    # Use the main result chunks as the source list for the API response
-    representative_chunks: list[dict] = list(main_result["results"])
+    allowed_owners scopes retrieval to a user's documents (+ shared). None =
+    no scoping (returns everything — used only when user-scoping is disabled).
+    """
+    from core.nlp.tokenizer import tokenize
+    from loguru import logger
+
+    t0 = time.time()
+    _llm.begin_request()  # reset per-request LLM stats for this thread
+
+    # Retrieve a representative set of chunks for router_decision metadata.
+    # Best-effort: this is only for the response's sources/router metadata, so a
+    # hiccup here must not fail the whole request — the agent does its own
+    # retrieval internally.
+    router_decision: dict = {}
+    representative_chunks: list[dict] = []
+    try:
+        tokens = tokenize(query)
+        embedding = _embedder.embed_text(query)
+        main_result = _retriever.retrieve_with_router(
+            query_tokens=tokens,
+            query_embedding=embedding,
+            query_str=query,
+            top_k=12,
+            allowed_owners=allowed_owners,
+        )
+        router_decision = main_result["router_decision"]
+        representative_chunks = list(main_result["results"])
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(f"[QUERY] representative retrieval failed (non-fatal): {exc}")
 
     # Run DD+Expert agent (handles its own retrieval internally).
     # Return the raw answer with [FORMULA]$...$[/FORMULA] blocks intact —
     # render_formula_answer() is for terminal only; the frontend uses KaTeX.
-    result = _agent.run(query)
+    result = _agent.run(query, allowed_owners=allowed_owners)
     answer = result["answer"]
+
+    # Per-request summary: how many LLM calls and how long it all took.
+    stats = _llm.request_stats()
+    total_s = round(time.time() - t0, 2)
+    logger.info(
+        f"[REQUEST STATS] request_id={request_id} | llm_calls={stats['llm_calls']} | "
+        f"llm_time={stats['llm_time_s']}s | total_time={total_s}s "
+        f"(non-llm={round(total_s - stats['llm_time_s'], 2)}s) | "
+        f"query={query[:60]!r}"
+    )
 
     return answer, representative_chunks, router_decision
 
 
-def _append_to_session(session_id: str, record: dict) -> None:
-    date_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-    session_path = CHAT_HISTORY_DIR / f"{date_str}_{session_id}.jsonl"
-    with open(session_path, "a", encoding="utf-8") as f:
-        f.write(json.dumps(record, ensure_ascii=False) + "\n")
+# ---------------------------------------------------------------------------
+# Authentication
+# ---------------------------------------------------------------------------
+# A single API-key gate protects every data endpoint. Behaviour:
+#   * PRESCISE_API_KEY set            -> the key is enforced on every request
+#                                        (callers send  X-API-Key: <key>).
+#   * key unset + environment local   -> open (so the bundled test frontend
+#                                        works during local development).
+#   * key unset + environment != local-> fail closed (refuse all requests) so
+#                                        a deployment can never run unprotected.
+# Environment is read from PRESCISE_ENV, falling back to app_config.yaml's
+# app.environment, defaulting to "local".
+# ---------------------------------------------------------------------------
+_API_KEY_HEADER = APIKeyHeader(name="X-API-Key", auto_error=False)
+
+
+def require_api_key(api_key: str | None = Security(_API_KEY_HEADER)) -> None:
+    expected = os.getenv("PRESCISE_API_KEY", "").strip()
+    if not expected:
+        if settings.environment() != "local":
+            raise HTTPException(
+                status_code=500,
+                detail="Server auth misconfigured: PRESCISE_API_KEY must be set outside the local environment.",
+            )
+        return  # local dev with no key configured: endpoints are open
+    if api_key != expected:
+        raise HTTPException(status_code=401, detail="Invalid or missing API key.")
+
+
+# Per-user identity. Today it comes from an X-User-Id header (defaulting to a
+# single shared user for local testing); when AURA integrates, AURA forwards the
+# authenticated user id here. All chat history is scoped by this value.
+_USER_ID_HEADER = APIKeyHeader(name="X-User-Id", auto_error=False)
+
+
+_USER_ID_RE = re.compile(r"^[A-Za-z0-9_.@-]{1,128}$")
+
+
+def current_user_id(user_id: str | None = Security(_USER_ID_HEADER)) -> str:
+    uid = (user_id or "").strip()
+    if not uid:
+        return "default_user"
+    # user_id is used in filesystem paths (data/uploads/{user_id}/…), so it must
+    # be a strict, traversal-safe token. Reject anything with '/', '..', etc.
+    if not _USER_ID_RE.match(uid):
+        raise HTTPException(status_code=400, detail="Invalid X-User-Id.")
+    return uid
 
 
 # ---------------------------------------------------------------------------
@@ -199,13 +292,15 @@ def _run_nougat_scan(retriever, embedder) -> None:
     from core.formula.nougat_scanner import NougatFormulaScanner
     from core.persistence.index_manager import IndexManager
 
-    scanner = NougatFormulaScanner(embedder, "data/index")
-    mgr = IndexManager("data/pdfs", "data/index")
+    scanner = NougatFormulaScanner(embedder, INDEX_DIR)
+    mgr = IndexManager(PDF_DIR, INDEX_DIR)
 
-    pdf_dir = Path("data/pdfs")
+    pdf_dir = Path(PDF_DIR)
     pdfs = sorted(pdf_dir.glob("*.pdf"))
     if not pdfs:
         logger.info("[VLM SCAN] No PDFs found — skipping Nougat scan.")
+        _nougat_scan_running = False
+        _nougat_scan_complete = True
         return
 
     total_added = 0
@@ -272,10 +367,61 @@ def _run_nougat_scan(retriever, embedder) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Document upload — background indexing jobs (run in the thread pool)
+# ---------------------------------------------------------------------------
+def _index_document_job(pdf_path: str, doc_id: str, user_id: str) -> None:
+    """Parse/chunk/embed an uploaded PDF and hot-add it to the live index."""
+    from loguru import logger
+    from core.persistence.index_manager import IndexManager
+
+    db.set_document_status(doc_id, db.DOC_INDEXING)
+    try:
+        mgr = IndexManager(PDF_DIR, INDEX_DIR)
+        n = mgr.index_uploaded_pdf(pdf_path, doc_id, user_id, _embedder, _retriever)
+        db.set_document_status(doc_id, db.DOC_READY, n_chunks=n)
+        logger.info(f"[UPLOAD] {doc_id} ready ({n} chunks) for user {user_id}")
+    except Exception as exc:  # noqa: BLE001
+        logger.error(f"[UPLOAD] Indexing failed for {doc_id}: {exc}")
+        # Roll back any chunks already added (index + DB) so a 'failed' doc can't
+        # leave orphan chunks live/queryable.
+        try:
+            IndexManager(PDF_DIR, INDEX_DIR).remove_document_from_index(doc_id, _retriever)
+        except Exception:  # noqa: BLE001
+            pass
+        db.set_document_status(doc_id, db.DOC_FAILED, error=str(exc))
+
+
+def _remove_document_job(doc_id: str) -> None:
+    from core.persistence.index_manager import IndexManager
+    IndexManager(PDF_DIR, INDEX_DIR).remove_document_from_index(doc_id, _retriever)
+
+
+# ---------------------------------------------------------------------------
 # Routes
 # ---------------------------------------------------------------------------
-@app.post("/api/query", response_model=QueryResponse)
-async def query_endpoint(req: QueryRequest):
+@app.get("/health")
+async def health():
+    """Liveness/readiness probe (unauthenticated). Reports model/index/DB state."""
+    try:
+        db_chunks = db.count_chunks()
+        db_ok = True
+    except Exception:
+        db_chunks, db_ok = None, False
+    retr = _retriever
+    return {
+        "status": "ok",
+        "environment": settings.environment(),
+        "embedder_initialized": _embedder is not None,
+        "llm_mock_mode": bool(getattr(_llm, "is_mock", False)),
+        "db_ok": db_ok,
+        "db_chunks": db_chunks,
+        "index_text_chunks": len(getattr(retr, "chunks", []) or []),
+        "index_formula_chunks": len(getattr(retr, "formula_chunks", []) or []),
+    }
+
+
+@app.post("/api/query", response_model=QueryResponse, dependencies=[Depends(require_api_key)])
+async def query_endpoint(req: QueryRequest, request: Request, user_id: str = Depends(current_user_id)):
     if len(req.query) > MAX_QUERY_LEN:
         raise HTTPException(
             status_code=400,
@@ -286,26 +432,30 @@ async def query_endpoint(req: QueryRequest):
 
     session_id = req.session_id or str(uuid.uuid4())
     timestamp = datetime.now(timezone.utc).isoformat()
+    request_id = getattr(request.state, "request_id", "-")
 
+    allowed_owners = {user_id, SHARED_OWNER}
     loop = asyncio.get_event_loop()
     try:
         answer, raw_results, router_decision = await loop.run_in_executor(
-            None, _run_query, req.query
+            None, _run_query, req.query, allowed_owners, request_id
         )
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
     sources = [_chunk_to_source(item) for item in raw_results]
 
-    record = {
-        "query": req.query,
-        "answer": answer,
-        "sources": [s.model_dump() for s in sources],
-        "router_decision": router_decision,
-        "session_id": session_id,
-        "timestamp": timestamp,
-    }
-    _append_to_session(session_id, record)
+    try:
+        db.add_message(
+            user_id=user_id,
+            session_id=session_id,
+            query=req.query,
+            answer=answer,
+            sources=[s.model_dump() for s in sources],
+            router=router_decision,
+        )
+    except PermissionError:
+        raise HTTPException(status_code=403, detail="Session belongs to another user.")
 
     return QueryResponse(
         query=req.query,
@@ -317,57 +467,111 @@ async def query_endpoint(req: QueryRequest):
     )
 
 
-@app.get("/api/history")
-async def list_history():
-    """Return summary list of all sessions, newest first."""
-    sessions: list[dict] = []
-    for f in sorted(CHAT_HISTORY_DIR.glob("*.jsonl"), key=lambda p: p.stat().st_mtime, reverse=True):
-        try:
-            lines = f.read_text(encoding="utf-8").splitlines()
-            if not lines:
-                continue
-            first = json.loads(lines[0])
-            # Extract session_id from filename: {date}_{session_id}.jsonl
-            stem = f.stem  # e.g. "2026-02-19_abc123"
-            sid = stem[len("2026-02-19_"):] if "_" in stem else stem
-            # More robust: split on first underscore after date
-            parts = stem.split("_", 1)
-            date_part = parts[0] if len(parts) > 1 else ""
-            sid = parts[1] if len(parts) > 1 else stem
-            sessions.append({
-                "session_id": sid,
-                "date": date_part,
-                "title": first.get("query", "")[:80],
-                "message_count": len(lines),
-            })
-        except Exception:
-            continue
-    return sessions
+@app.get("/api/history", dependencies=[Depends(require_api_key)])
+async def list_history(user_id: str = Depends(current_user_id)):
+    """Return summary list of the current user's sessions, newest first."""
+    return db.list_sessions(user_id)
 
 
-@app.get("/api/history/{session_id}")
-async def get_session(session_id: str):
-    """Return all messages for a session."""
-    f = _session_file(session_id)
-    if f is None:
+@app.get("/api/history/{session_id}", dependencies=[Depends(require_api_key)])
+async def get_session(session_id: str, user_id: str = Depends(current_user_id)):
+    """Return all messages for one of the current user's sessions."""
+    messages = db.get_session_messages(user_id, session_id)
+    if messages is None:
         raise HTTPException(status_code=404, detail="Session not found.")
+    return messages
+
+
+@app.delete("/api/history/{session_id}", status_code=204, dependencies=[Depends(require_api_key)])
+async def delete_session(session_id: str, user_id: str = Depends(current_user_id)):
+    """Delete one of the current user's sessions."""
+    if not db.delete_session(user_id, session_id):
+        raise HTTPException(status_code=404, detail="Session not found.")
+
+
+# ---------------------------------------------------------------------------
+# Document upload / management (the core "upload your docs and ask" flow)
+# ---------------------------------------------------------------------------
+@app.post("/api/documents", dependencies=[Depends(require_api_key)])
+async def upload_document(
+    file: UploadFile = File(...),
+    user_id: str = Depends(current_user_id),
+):
+    """Upload a PDF; it is indexed in the background and becomes queryable when
+    its status reaches 'ready' (poll GET /api/documents/{doc_id})."""
+    if not file.filename or not file.filename.lower().endswith(".pdf"):
+        raise HTTPException(status_code=400, detail="Only PDF files are supported.")
+
+    doc_id = uuid.uuid4().hex
+    user_dir = UPLOAD_DIR / user_id
+    user_dir.mkdir(parents=True, exist_ok=True)
+    dest = user_dir / f"{doc_id}.pdf"
+
+    size = 0
     try:
-        lines = f.read_text(encoding="utf-8").splitlines()
-        return [json.loads(line) for line in lines if line.strip()]
-    except Exception as exc:
-        raise HTTPException(status_code=500, detail=str(exc)) from exc
+        with open(dest, "wb") as out:
+            while True:
+                chunk = await file.read(1 << 20)  # 1 MiB
+                if not chunk:
+                    break
+                size += len(chunk)
+                if size > MAX_UPLOAD_BYTES:
+                    raise HTTPException(
+                        status_code=413,
+                        detail=f"File too large (max {MAX_UPLOAD_BYTES // (1024*1024)} MB).",
+                    )
+                out.write(chunk)
+    except HTTPException:
+        dest.unlink(missing_ok=True)
+        raise
+    except Exception as exc:  # noqa: BLE001
+        dest.unlink(missing_ok=True)
+        raise HTTPException(status_code=500, detail=f"Failed to save upload: {exc}") from exc
+
+    db.create_document(user_id, doc_id, file.filename)
+
+    # Index in the background so the request returns immediately.
+    loop = asyncio.get_event_loop()
+    loop.run_in_executor(None, _index_document_job, str(dest), doc_id, user_id)
+
+    return {"doc_id": doc_id, "filename": file.filename, "status": db.DOC_PENDING}
 
 
-@app.delete("/api/history/{session_id}", status_code=204)
-async def delete_session(session_id: str):
-    """Delete a session file."""
-    f = _session_file(session_id)
-    if f is None:
-        raise HTTPException(status_code=404, detail="Session not found.")
-    f.unlink(missing_ok=True)
+@app.get("/api/documents", dependencies=[Depends(require_api_key)])
+async def list_documents(user_id: str = Depends(current_user_id)):
+    """List the current user's documents and their indexing status."""
+    return db.list_documents(user_id)
 
 
-@app.get("/api/vlm_scan_status")
+@app.get("/api/documents/{doc_id}", dependencies=[Depends(require_api_key)])
+async def get_document(doc_id: str, user_id: str = Depends(current_user_id)):
+    """Status/progress for one of the user's documents (for the 'indexing…' UI)."""
+    doc = db.get_document(user_id, doc_id)
+    if doc is None:
+        raise HTTPException(status_code=404, detail="Document not found.")
+    return doc
+
+
+@app.delete("/api/documents/{doc_id}", status_code=204, dependencies=[Depends(require_api_key)])
+async def delete_document(doc_id: str, user_id: str = Depends(current_user_id)):
+    """Delete a document: remove its chunks from the index, its file, and its row."""
+    doc = db.get_document(user_id, doc_id)
+    if doc is None:
+        raise HTTPException(status_code=404, detail="Document not found.")
+
+    loop = asyncio.get_event_loop()
+    try:
+        await loop.run_in_executor(None, _remove_document_job, doc_id)
+    except Exception as exc:  # noqa: BLE001
+        # Index removal failing must not block deleting the row + file.
+        from loguru import logger
+        logger.error(f"[DELETE] index removal failed for {doc_id}: {exc}")
+
+    db.delete_document(user_id, doc_id)
+    (UPLOAD_DIR / user_id / f"{doc_id}.pdf").unlink(missing_ok=True)
+
+
+@app.get("/api/vlm_scan_status", dependencies=[Depends(require_api_key)])
 async def vlm_scan_status():
     """Return the Nougat VLM scan status, including running/complete flags."""
     p = Path("data/index/vlm_scan_status.json")
@@ -388,9 +592,9 @@ async def vlm_scan_status():
 # ---------------------------------------------------------------------------
 # Agent-to-Agent API  (/api/agent/query)
 # ---------------------------------------------------------------------------
-# Authentication: set PRESCISE_API_KEY in .env.  If the variable is empty or
-# absent, the endpoint is open (useful for local development).  Protect it in
-# production by setting a strong random value.
+# Authentication: shared with all data endpoints via require_api_key (see the
+# Authentication section above). The key is enforced whenever PRESCISE_API_KEY
+# is set, and is mandatory outside the local environment.
 #
 # Callers pass the key as:   X-API-Key: <your-key>
 #
@@ -401,15 +605,6 @@ async def vlm_scan_status():
 #   - request_id     echoed from the request (or a fresh UUID if omitted)
 #   - processing_time_s  wall-clock seconds for the full pipeline
 # ---------------------------------------------------------------------------
-
-_AGENT_API_KEY_HEADER = APIKeyHeader(name="X-API-Key", auto_error=False)
-
-
-def _check_api_key(api_key: str | None = Security(_AGENT_API_KEY_HEADER)) -> None:
-    expected = os.getenv("PRESCISE_API_KEY", "")
-    if expected and api_key != expected:
-        raise HTTPException(status_code=401, detail="Invalid or missing API key.")
-
 
 class AgentQueryRequest(BaseModel):
     query: str = Field(..., min_length=1, max_length=512, description="The scientific question to answer.")
@@ -489,16 +684,30 @@ def _extract_agent_sources(all_retrieved_chunks: list[dict]) -> list[AgentSource
 )
 async def agent_query(
     req: AgentQueryRequest,
-    _: None = Depends(_check_api_key),
+    _: None = Depends(require_api_key),
 ):
+    from loguru import logger
+
     request_id = req.request_id or str(uuid.uuid4())
     t0 = time.time()
 
+    def _run() -> tuple[dict, dict]:
+        # begin_request + read stats must run in the same worker thread.
+        _llm.begin_request()
+        res = _agent.run(req.query)
+        return res, _llm.request_stats()
+
     loop = asyncio.get_event_loop()
     try:
-        result = await loop.run_in_executor(None, lambda: _agent.run(req.query))
+        result, stats = await loop.run_in_executor(None, _run)
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+    total_s = round(time.time() - t0, 2)
+    logger.info(
+        f"[REQUEST STATS] request_id={request_id} | llm_calls={stats['llm_calls']} | "
+        f"llm_time={stats['llm_time_s']}s | total_time={total_s}s | query={req.query[:60]!r}"
+    )
 
     sources = _extract_agent_sources(result.get("all_retrieved_chunks", []))
 

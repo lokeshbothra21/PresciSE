@@ -53,6 +53,7 @@ class DDExpertState(TypedDict):
     parameter_priorities: Dict[str, int] # question_key → weight 1–3 (from DD_PLAN)
     parameter_scores: Dict[str, int]     # question_key → latest score 0–2 (from DD_EVALUATE)
     all_retrieved_chunks: List[Dict[str, Any]]  # every chunk seen across all retrieve() calls
+    allowed_owners: Optional[set]        # owner-id scope for retrieval (None = no scoping)
 
 
 # ---------------------------------------------------------------------------
@@ -72,6 +73,12 @@ class DDExpertAgent:
         top_k_per_subq: Chunks to retrieve per subquestion.
         max_iterations: Maximum retrieve/expert/evaluate cycles (default 5).
     """
+
+    # Output-token cap for internal control-flow calls (plan / evaluate /
+    # formula_plan). These emit short JSON, so this bounds worst-case
+    # generation time without truncating valid output or touching the
+    # expert/synthesis calls that produce the actual answer.
+    _INTERNAL_MAX_TOKENS = 1024
 
     def __init__(
         self,
@@ -136,8 +143,13 @@ class DDExpertAgent:
             context_description=state["context_description"],
             query=state["query"],
         )
-        raw = self.llm.generate(prompt)
-        parsed = _parse_json(raw)
+        try:
+            raw = self.llm.generate(prompt, max_output_tokens=self._INTERNAL_MAX_TOKENS)
+            parsed = _parse_json(raw)
+        except Exception as exc:  # noqa: BLE001
+            from loguru import logger as _log
+            _log.warning(f"[DD PLAN] planning failed ({exc}); falling back to single-subquestion plan")
+            parsed = {"in_scope": True, "subquestions": [state["query"]], "priorities": {}}
 
         if not parsed.get("in_scope", True):
             reason = parsed.get("reason", "Query is outside the scope of the indexed documents.")
@@ -178,12 +190,18 @@ class DDExpertAgent:
 
         from core.nlp.tokenizer import tokenize
 
+        subquestions = state["subquestions"]
+        # Batch-embed all subquestions in a single call instead of one
+        # embed_text() per subquestion — identical vectors, far less per-call
+        # overhead (and one batched GPU/CPU pass instead of N sequential ones).
+        embeddings = self.embedder.embed_texts(subquestions)
+
+        allowed_owners = state.get("allowed_owners")
         retrieved_per_subq: List[List[Dict[str, Any]]] = []
-        for subq in state["subquestions"]:
+        for subq, embedding in zip(subquestions, embeddings):
             tokens = tokenize(subq)
-            embedding = self.embedder.embed_text(subq)
             items = self.retriever.retrieve_with_formulas(
-                tokens, embedding, top_k=self.top_k_per_subq
+                tokens, embedding, top_k=self.top_k_per_subq, allowed_owners=allowed_owners
             )
             retrieved_per_subq.append(items)
 
@@ -242,7 +260,7 @@ class DDExpertAgent:
             query=state["query"],
             qa_pairs=qa_text,
         )
-        raw = self.llm.generate(prompt)
+        raw = self.llm.generate(prompt, max_output_tokens=self._INTERNAL_MAX_TOKENS)
         parsed = _parse_json(raw)
 
         # Extract per-subquestion scores and accumulate into parameter_scores
@@ -298,7 +316,7 @@ class DDExpertAgent:
 
         prompt = DD_FORMULA_PLAN_PROMPT.format(query=state["query"])
         try:
-            raw = self.llm.generate(prompt)
+            raw = self.llm.generate(prompt, max_output_tokens=self._INTERNAL_MAX_TOKENS)
             parsed = _parse_json(raw)
             subquestions = parsed.get("subquestions", [])
             if not isinstance(subquestions, list) or len(subquestions) == 0:
@@ -347,16 +365,35 @@ class DDExpertAgent:
             formula_score=formula_score,
             overall_pct=round(overall_pct, 1),
         )
-        state["final_answer"] = self.llm.generate(prompt)
+        try:
+            state["final_answer"] = self.llm.generate(prompt)
+        except Exception as exc:  # noqa: BLE001
+            from loguru import logger as _log
+            _log.warning(f"[SYNTHESIZE] final synthesis failed ({exc}); assembling gathered findings")
+            parts = [qa["answer"] for qa in state.get("expert_qa", []) if qa.get("answer")]
+            if parts:
+                state["final_answer"] = (
+                    "Note: final synthesis was temporarily unavailable, so here are the "
+                    "gathered findings:\n\n" + "\n\n".join(parts)
+                )
+            else:
+                state["final_answer"] = (
+                    "I couldn't complete the analysis due to a temporary issue. Please try again."
+                )
         return state
 
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
 
-    def run(self, query: str) -> Dict[str, Any]:
+    def run(self, query: str, allowed_owners: Optional[set] = None) -> Dict[str, Any]:
         """
         Run the DD+Expert pipeline for a query.
+
+        Args:
+            query: the user question.
+            allowed_owners: optional set of owner ids to scope retrieval to
+                (e.g. {user_id, "__shared__"}). None disables scoping.
 
         Returns:
             Dict with at least ``{"answer": str}``.
@@ -375,8 +412,24 @@ class DDExpertAgent:
             "parameter_priorities": {},
             "parameter_scores": {},
             "all_retrieved_chunks": [],
+            "allowed_owners": allowed_owners,
         }
-        result = self._graph.invoke(initial)
+        try:
+            result = self._graph.invoke(initial)
+        except Exception as exc:  # noqa: BLE001
+            # Last-resort guard: a node failure (e.g. LLM/embedder unavailable
+            # after retries) returns a clean message instead of a 500 + stack.
+            from loguru import logger as _log
+            _log.error(f"[DD AGENT] pipeline failed: {exc}")
+            return {
+                "answer": (
+                    "I couldn't complete this request due to a temporary issue "
+                    "(the language model or retrieval was briefly unavailable). "
+                    "Please try again in a moment."
+                ),
+                "expert_qa": [],
+                "all_retrieved_chunks": [],
+            }
         return {
             "answer": result["final_answer"],
             "expert_qa": result["expert_qa"],

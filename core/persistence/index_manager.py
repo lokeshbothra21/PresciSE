@@ -281,17 +281,15 @@ class IndexManager:
             HybridRetriever with loaded indexes and formula chunks
         """
         try:
-            # Load text chunks
-            with open(self.chunks_path, "rb") as f:
-                chunks = pickle.load(f)
-            
+            # Load text chunks (with .bak fallback if the main file is corrupt)
+            chunks = self._load_pickle_with_backup(self.chunks_path)
+
             logger.info(f"✅ Loaded {len(chunks)} text chunks from disk")
-            
+
             # Load formula chunks
             formula_chunks = []
             if file_exists(self.formula_chunks_path):
-                with open(self.formula_chunks_path, "rb") as f:
-                    formula_chunks = pickle.load(f)
+                formula_chunks = self._load_pickle_with_backup(self.formula_chunks_path)
                 logger.info(f"🔬 Loaded {len(formula_chunks)} formula chunks from disk")
             
             # Create retriever and load indexes
@@ -748,34 +746,165 @@ class IndexManager:
             except Exception as exc:
                 logger.warning(f"[INDEX MGR] Could not save formula FAISS index: {exc}")
 
+    def load_only(self) -> HybridRetriever:
+        """
+        Startup path: rebuild the in-memory FAISS + BM25 indexes from the DB
+        chunk store (the source of truth). No folder scan, no pickle — ingestion
+        happens via upload. A fresh DB yields an empty retriever that uploads
+        will populate.
+        """
+        from core.persistence import db
+
+        text_chunks, formula_chunks = db.load_chunks()
+        logger.info(
+            f"Loaded {len(text_chunks)} text + {len(formula_chunks)} formula chunks "
+            f"from DB (rebuilding FAISS + BM25 in memory)..."
+        )
+        return HybridRetriever(text_chunks, formula_chunks=formula_chunks)
+
+    def index_uploaded_pdf(
+        self,
+        pdf_path: str,
+        doc_id: str,
+        owner_user_id: str,
+        embedder: "Embedder",
+        retriever: "HybridRetriever",
+    ) -> int:
+        """
+        Parse, chunk, embed a single uploaded PDF; tag every chunk with
+        ``doc_id`` + ``owner_user_id``; hot-add to the live retriever (no
+        restart) and persist. Returns the number of text chunks added.
+
+        Used by the upload endpoint's background indexer. Raises on failure so
+        the caller can mark the document FAILED.
+        """
+        doc = load_pdf_as_document(pdf_path)
+
+        # --- Text chunks ---
+        chunks = make_chunks_from_doc(doc)
+        if not chunks:
+            raise ValueError("No text chunks were produced from the PDF.")
+        texts = [c["text"] for c in chunks]
+        embeddings = embedder.embed_texts(texts)
+        if len(embeddings) != len(chunks):
+            raise ValueError(
+                f"Embedding count {len(embeddings)} != chunk count {len(chunks)}"
+            )
+        # Tag EVERY chunk (loop over chunks, not zip) so a count mismatch can
+        # never leave a chunk untagged → owner-less → world-visible ("__shared__").
+        for i, c in enumerate(chunks):
+            c["embedding"] = embeddings[i]
+            c["doc_id"] = doc_id
+            c["owner_user_id"] = owner_user_id
+            c["chunk_id"] = f"{doc_id}_{i}"  # doc_id is a uuid → globally unique
+
+        # --- Formula chunks (best-effort; never fail the upload over formulas) ---
+        new_formula_chunks: List[Dict[str, Any]] = []
+        try:
+            formula_chunks = extract_formulas_from_pdf_pages(
+                pdf_path, doc_id=doc_id, quality_mode=self.formula_quality_mode
+            )
+            if formula_chunks:
+                formula_texts = [
+                    fc.get("embedding_text")
+                    or f"The equation is defined as:\n{fc.get('normalized_formula', fc.get('formula_text', ''))}\n{fc.get('context_text', '')}"
+                    for fc in formula_chunks
+                ]
+                formula_embeddings = embedder.embed_texts(formula_texts)
+                if len(formula_embeddings) != len(formula_chunks):
+                    raise ValueError("formula embedding/chunk count mismatch")
+                for j, fc in enumerate(formula_chunks):
+                    fc["embedding"] = formula_embeddings[j]
+                    fc["owner_user_id"] = owner_user_id
+                new_formula_chunks = formula_chunks
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(f"[UPLOAD] Formula extraction failed for {doc_id}: {exc}")
+
+        # --- Hot-add to live indexes (atomic inside the retriever's locks) ---
+        retriever.add_text_chunks(chunks)
+        if new_formula_chunks:
+            retriever.add_formula_chunks(new_formula_chunks)
+
+        # --- Persist to the DB (the source of truth; survives restart) ---
+        from core.persistence import db
+
+        db.add_chunks(chunks, chunk_type="text")
+        if new_formula_chunks:
+            db.add_chunks(new_formula_chunks, chunk_type="formula")
+        logger.info(f"[UPLOAD] Indexed {doc_id}: +{len(chunks)} chunks, +{len(new_formula_chunks)} formulas (DB-backed)")
+        return len(chunks)
+
+    def remove_document_from_index(self, doc_id: str, retriever: "HybridRetriever") -> None:
+        """Remove a document's text + formula chunks from the live index and the DB."""
+        from core.persistence import db
+
+        retriever.remove_document_chunks(doc_id)
+        all_formula_chunks = [
+            fc for fc in retriever.formula_chunks if fc.get("doc_id") != doc_id
+        ]
+        if len(all_formula_chunks) != len(retriever.formula_chunks):
+            retriever.update_formula_index(all_formula_chunks)
+        db.delete_chunks_for_doc(doc_id)
+        logger.info(f"[UPLOAD] Removed {doc_id} from index + DB")
+
+    @staticmethod
+    def _atomic_pickle(obj: Any, path: str) -> None:
+        """
+        Crash-safe pickle write: dump to a temp file (fsynced), keep the current
+        file as a one-deep ``.bak``, then atomically rename into place. A crash
+        mid-write leaves the previous good file (or its .bak) intact rather than
+        a truncated/corrupt pickle. Important now that uploads persist live,
+        mid-serving.
+        """
+        tmp = path + ".tmp"
+        with open(tmp, "wb") as f:
+            pickle.dump(obj, f)
+            f.flush()
+            os.fsync(f.fileno())
+        if os.path.exists(path):
+            try:
+                os.replace(path, path + ".bak")
+            except OSError:
+                pass
+        os.replace(tmp, path)
+
+    @staticmethod
+    def _load_pickle_with_backup(path: str) -> Any:
+        """Load a pickle, falling back to its ``.bak`` if the main file is corrupt."""
+        try:
+            with open(path, "rb") as f:
+                return pickle.load(f)
+        except Exception as e:
+            bak = path + ".bak"
+            if os.path.exists(bak):
+                logger.warning(f"{path} unreadable ({e}); falling back to backup {bak}")
+                with open(bak, "rb") as f:
+                    return pickle.load(f)
+            raise
+
     def _save_indexes(self, retriever: HybridRetriever, chunks: List[Dict[str, Any]], formula_chunks: List[Dict[str, Any]] = None) -> None:
         """
-        Save indexes to disk (text + formula).
-        
-        Args:
-            retriever: HybridRetriever to save
-            chunks: List of all text chunks
-            formula_chunks: List of all formula chunks
+        Save indexes to disk (text + formula). Chunk pickles are written
+        atomically with a one-deep backup; the BM25/FAISS binaries are
+        rebuildable from the chunks, so they use the retriever's own save.
         """
         try:
-            # Save text chunks
-            with open(self.chunks_path, "wb") as f:
-                pickle.dump(chunks, f)
-            
-            # Save formula chunks
+            # Save text chunks (atomic + backup)
+            self._atomic_pickle(chunks, self.chunks_path)
+
+            # Save formula chunks (atomic + backup)
             if formula_chunks is not None:
-                with open(self.formula_chunks_path, "wb") as f:
-                    pickle.dump(formula_chunks, f)
+                self._atomic_pickle(formula_chunks, self.formula_chunks_path)
                 logger.info(f"Saved {len(formula_chunks)} formula chunks")
-            
-            # Save indexes
+
+            # Save indexes (BM25/FAISS — rebuildable from chunks)
             retriever.save(self.index_dir)
-            
+
             # Save registry
             self.tracker.save()
-            
+
             logger.info(f"[SAVED] Indexes saved to {self.index_dir}/")
-            
+
         except Exception as e:
             logger.error(f"Error saving indexes: {e}")
             raise

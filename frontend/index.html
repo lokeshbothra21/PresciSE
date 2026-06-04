@@ -500,6 +500,35 @@
     }
     #sidebar.open { transform: translateX(0); }
 
+    /* Documents sidebar — mirrors #sidebar but slides in from the right */
+    #doc-sidebar {
+      position: fixed;
+      top: 0; right: 0;
+      height: 100%;
+      width: 340px;
+      background: linear-gradient(180deg, #0f0520 0%, #0a0a0f 100%);
+      border-left: 1px solid #2d2d3e;
+      z-index: 101;
+      transform: translateX(100%);
+      transition: transform 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+      display: flex;
+      flex-direction: column;
+    }
+    #doc-sidebar.open { transform: translateX(0); }
+    .doc-upload-box { padding: 0.9rem 1rem; border-bottom: 1px solid #1e1e2e; display: flex; flex-direction: column; gap: 0.5rem; }
+    .doc-user-row { display: flex; align-items: center; gap: 0.4rem; font-size: 0.8rem; color: var(--text-muted); }
+    .doc-user-row input { flex: 1; background: #1a0a2e; border: 1px solid #2d2d3e; color: var(--text-white); border-radius: 6px; padding: 0.35rem 0.5rem; font-size: 0.8rem; }
+    #doc-list { flex: 1; overflow-y: auto; padding: 0.75rem; display: flex; flex-direction: column; gap: 0.5rem; }
+    .doc-card { border: 1px solid #2d2d3e; border-radius: 8px; padding: 0.6rem 0.7rem; display: flex; align-items: center; gap: 0.5rem; }
+    .doc-card-body { flex: 1; min-width: 0; }
+    .doc-name { font-size: 0.85rem; color: var(--text-white); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .doc-status { font-size: 0.72rem; margin-top: 0.15rem; }
+    .doc-status.ready { color: #46d369; }
+    .doc-status.indexing, .doc-status.pending { color: #e6c34a; }
+    .doc-status.failed { color: #ff6b6b; }
+    .doc-del { background: none; border: none; color: var(--text-muted); cursor: pointer; font-size: 1rem; }
+    .doc-del:hover { color: #ff6b6b; }
+
     .sidebar-header {
       display: flex;
       align-items: center;
@@ -606,17 +635,31 @@
         <svg viewBox="0 0 24 24"><path d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z"/></svg>
       </button>
     </div>
+    <button class="header-btn" id="home-docs-btn" style="margin-top:1.1rem;">
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor">
+        <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8l-6-6zm2 16H8v-2h8v2zm0-4H8v-2h8v2zm-3-5V3.5L18.5 9H13z"/>
+      </svg>
+      Upload / manage documents
+    </button>
   </div>
 
   <!-- CHAT VIEW -->
   <div id="chat-view">
     <div id="header">
-      <button class="header-btn" id="history-btn">
-        <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor">
-          <path d="M3 18h18v-2H3v2zm0-5h18v-2H3v2zm0-7v2h18V6H3z"/>
-        </svg>
-        History
-      </button>
+      <div style="display:flex;align-items:center;gap:0.5rem;">
+        <button class="header-btn" id="history-btn">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor">
+            <path d="M3 18h18v-2H3v2zm0-5h18v-2H3v2zm0-7v2h18V6H3z"/>
+          </svg>
+          History
+        </button>
+        <button class="header-btn" id="docs-btn">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor">
+            <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8l-6-6zm2 16H8v-2h8v2zm0-4H8v-2h8v2zm-3-5V3.5L18.5 9H13z"/>
+          </svg>
+          Docs
+        </button>
+      </div>
       <span class="header-brand">PresciSE</span>
       <div style="display:flex;align-items:center;gap:0.5rem;">
         <div id="nougat-status" role="status" aria-live="polite">
@@ -658,6 +701,24 @@
   <div id="session-list"></div>
 </div>
 
+<!-- DOCUMENTS SIDEBAR -->
+<div id="doc-sidebar" role="dialog" aria-label="My documents">
+  <div class="sidebar-header">
+    <span class="sidebar-title">My Documents</span>
+    <button class="sidebar-close" id="doc-sidebar-close" aria-label="Close">&times;</button>
+  </div>
+  <div class="doc-upload-box">
+    <div class="doc-user-row">
+      <label for="doc-user">User:</label>
+      <input id="doc-user" type="text" spellcheck="false" placeholder="default_user" />
+    </div>
+    <input id="doc-file" type="file" accept="application/pdf" style="font-size:0.8rem;color:var(--text-muted);" />
+    <button class="header-btn" id="doc-upload-btn" style="justify-content:center;">Upload PDF</button>
+    <div id="doc-upload-msg" style="font-size:0.75rem;color:var(--text-muted);"></div>
+  </div>
+  <div id="doc-list"></div>
+</div>
+
 <script>
 /* ============================================================
    CONFIG
@@ -672,6 +733,19 @@ let sessionId = null;
 let isLoading = false;
 let inChatMode = false;
 let activeSidebarSession = null;
+let docPollTimer = null;
+
+/* User identity for per-user document scoping. Sent as X-User-Id on every
+   request so uploads and queries share the same owner. Editable in the Docs
+   panel (persisted) so you can switch users to test isolation. */
+function getUser() {
+  const el = document.getElementById('doc-user');
+  const v = el && el.value ? el.value.trim() : '';
+  return v || 'default_user';
+}
+function uHeaders(extra) {
+  return Object.assign({ 'X-User-Id': getUser() }, extra || {});
+}
 
 /* ============================================================
    PARTICLE CANVAS
@@ -996,7 +1070,7 @@ async function sendQuery(query) {
   try {
     const res = await fetch('/api/query', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: uHeaders({ 'Content-Type': 'application/json' }),
       body: JSON.stringify({ query, session_id: sessionId }),
     });
 
@@ -1033,7 +1107,7 @@ async function loadHistory() {
   const list = document.getElementById('session-list');
   list.innerHTML = '<div class="sidebar-empty">Loading…</div>';
   try {
-    const res = await fetch('/api/history');
+    const res = await fetch('/api/history', { headers: uHeaders() });
     const sessions = await res.json();
     if (!sessions.length) {
       list.innerHTML = '<div class="sidebar-empty">No history yet.</div>';
@@ -1063,7 +1137,7 @@ async function loadHistory() {
       btn.addEventListener('click', async e => {
         e.stopPropagation();
         if (!confirm('Delete this session?')) return;
-        await fetch(`/api/history/${btn.dataset.sid}`, { method: 'DELETE' });
+        await fetch(`/api/history/${btn.dataset.sid}`, { method: 'DELETE', headers: uHeaders() });
         await loadHistory();
         if (sessionId === btn.dataset.sid) switchToHome();
       });
@@ -1076,7 +1150,7 @@ async function loadHistory() {
 
 async function loadSession(sid) {
   try {
-    const res = await fetch(`/api/history/${sid}`);
+    const res = await fetch(`/api/history/${sid}`, { headers: uHeaders() });
     if (!res.ok) { alert('Session not found.'); return; }
     const messages = await res.json();
     const container = document.getElementById('messages');
@@ -1108,6 +1182,97 @@ function closeSidebar() {
 }
 
 /* ============================================================
+   DOCUMENTS PANEL
+   ============================================================ */
+function openDocSidebar() {
+  document.getElementById('doc-sidebar').classList.add('open');
+  document.getElementById('sidebar-overlay').classList.add('open');
+  loadDocuments();
+}
+function closeDocSidebar() {
+  document.getElementById('doc-sidebar').classList.remove('open');
+  document.getElementById('sidebar-overlay').classList.remove('open');
+  if (docPollTimer) { clearInterval(docPollTimer); docPollTimer = null; }
+}
+
+function docStatusLabel(d) {
+  if (d.status === 'ready') return `✓ ready · ${d.n_chunks} chunks`;
+  if (d.status === 'indexing') return 'indexing…';
+  if (d.status === 'pending') return 'queued…';
+  if (d.status === 'failed') return 'failed: ' + (d.error || 'unknown');
+  return d.status;
+}
+
+async function loadDocuments() {
+  const list = document.getElementById('doc-list');
+  try {
+    const res = await fetch('/api/documents', { headers: uHeaders() });
+    const docs = await res.json();
+    if (!docs.length) {
+      list.innerHTML = '<div class="sidebar-empty">No documents yet. Upload a PDF above.</div>';
+    } else {
+      list.innerHTML = docs.map(d => `
+        <div class="doc-card">
+          <div class="doc-card-body">
+            <div class="doc-name" title="${escHtml(d.filename)}">${escHtml(d.filename)}</div>
+            <div class="doc-status ${escHtml(d.status)}">${escHtml(docStatusLabel(d))}</div>
+          </div>
+          <button class="doc-del" data-id="${escHtml(d.doc_id)}" title="Delete">&times;</button>
+        </div>`).join('');
+      list.querySelectorAll('.doc-del').forEach(btn => {
+        btn.addEventListener('click', () => deleteDocument(btn.dataset.id));
+      });
+    }
+    // Auto-refresh while anything is still indexing.
+    const busy = docs.length && docs.some(d => d.status === 'pending' || d.status === 'indexing');
+    if (busy && !docPollTimer) {
+      docPollTimer = setInterval(loadDocuments, 2000);
+    } else if (!busy && docPollTimer) {
+      clearInterval(docPollTimer); docPollTimer = null;
+    }
+  } catch {
+    list.innerHTML = '<div class="sidebar-empty">Failed to load documents.</div>';
+  }
+}
+
+async function uploadDocument() {
+  const fileInput = document.getElementById('doc-file');
+  const msg = document.getElementById('doc-upload-msg');
+  const file = fileInput.files[0];
+  if (!file) { msg.textContent = 'Choose a PDF first.'; return; }
+  msg.textContent = 'Uploading…';
+  try {
+    const fd = new FormData();
+    fd.append('file', file);
+    // Note: no Content-Type header — the browser sets the multipart boundary.
+    const res = await fetch('/api/documents', { method: 'POST', headers: uHeaders(), body: fd });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({ detail: res.statusText }));
+      msg.textContent = 'Upload failed: ' + (err.detail || res.status);
+      return;
+    }
+    msg.textContent = 'Uploaded — indexing in background…';
+    fileInput.value = '';
+    loadDocuments();
+  } catch {
+    msg.textContent = 'Network error during upload.';
+  }
+}
+
+async function deleteDocument(id) {
+  if (!confirm('Delete this document?')) return;
+  await fetch(`/api/documents/${id}`, { method: 'DELETE', headers: uHeaders() });
+  loadDocuments();
+}
+
+/* Restore/persist the test user id. */
+(function initDocUser() {
+  const el = document.getElementById('doc-user');
+  el.value = localStorage.getItem('prescise_user') || '';
+  el.addEventListener('change', () => localStorage.setItem('prescise_user', el.value.trim()));
+})();
+
+/* ============================================================
    EVENT WIRING
    ============================================================ */
 function wireSubmit(textarea, sendBtn) {
@@ -1129,8 +1294,12 @@ wireSubmit(chatTA, chatSend);
 
 document.getElementById('history-btn').addEventListener('click', openSidebar);
 document.getElementById('sidebar-close').addEventListener('click', closeSidebar);
-document.getElementById('sidebar-overlay').addEventListener('click', closeSidebar);
+document.getElementById('sidebar-overlay').addEventListener('click', () => { closeSidebar(); closeDocSidebar(); });
 document.getElementById('new-chat-btn').addEventListener('click', switchToHome);
+document.getElementById('docs-btn').addEventListener('click', openDocSidebar);
+document.getElementById('home-docs-btn').addEventListener('click', openDocSidebar);
+document.getElementById('doc-sidebar-close').addEventListener('click', closeDocSidebar);
+document.getElementById('doc-upload-btn').addEventListener('click', uploadDocument);
 
 // Initial focus
 homeTA.focus();

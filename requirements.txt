@@ -1,44 +1,56 @@
+# Pinned to the versions verified working in this environment.
+# (Loosen a pin only if you deliberately upgrade and re-test.)
+
 # Core
-pydantic>=2.0
-pyyaml
-python-dotenv
+pydantic==2.13.4
+pyyaml==6.0.3
+python-dotenv==1.2.2
 
 # NLP & IR
-spacy
-scikit-learn
-rank-bm25
-nltk
+spacy==3.8.14
+scikit-learn==1.8.0
+rank-bm25==0.2.2
+nltk==3.9.4
 
 # Vector search
-faiss-cpu  # Use faiss-gpu if GPU available
-sentence-transformers
+faiss-cpu==1.13.2  # swap for faiss-gpu on a CUDA box if desired
+sentence-transformers==5.4.1
 
 # LLM orchestration
-langchain
-langgraph
-langchain-google-genai  # Gemini integration for LangChain
-google-genai
+langchain==1.2.18
+langgraph==1.1.10
+langchain-google-genai==4.2.2  # Gemini integration for LangChain
+google-genai==1.75.0
 
-# Dynamic router (Qwen2.5)
-torch>=2.0.0
-transformers>=4.35.0
-peft  # Required for SPECTER2 PEFT adapters
+# Embeddings / models
+torch==2.11.0
+transformers==5.8.0
+peft==0.19.1
 
 # Document processing
-docling
-pymupdf
-Pillow>=10.0.0
+docling==2.93.0
+pymupdf==1.27.2.3
+Pillow==12.2.0
 
-# VLM formula scanning (Nougat)
-nougat-ocr>=0.1.17
+# VLM formula scanning (Nougat) — OPTIONAL background scan.
+# NOTE: nougat-ocr 0.1.17 is incompatible with transformers 5.x, so the Nougat
+# scan no-ops (caught + logged). Disable it with PRESCISE_ENABLE_VLM_BACKGROUND_SCAN=0.
+nougat-ocr==0.1.17
 
 # API & CLI
-fastapi
-uvicorn
-typer
+fastapi==0.136.1
+uvicorn==0.46.0
+typer==0.21.2
+python-multipart==0.0.30  # file uploads (POST /api/documents)
+
+# Persistence — SQLite by default (PRESCISE_DATABASE_URL); same models on PostgreSQL
+SQLAlchemy==2.0.50
 
 # Utilities
-loguru
-tenacity
-numpy
-pandas
+loguru==0.7.3
+tenacity==9.1.4
+numpy==2.4.4
+pandas==3.0.3
+
+# Dev / test
+pytest==9.0.3

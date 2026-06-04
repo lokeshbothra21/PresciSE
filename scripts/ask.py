@@ -141,6 +141,7 @@ def main():
         retriever = index_manager._build_from_scratch() if not chunks_path.exists() else index_manager.load_or_build()
 
     embedder = Embedder()
+    t0 = time.time()  # start of request timing (retrieval + agent)
     # Normalize query before tokenizing so Greek-letter names (zeta → ζ handled
     # in reverse by tokenizer) produce tokens that match the stored index tokens.
     query_tokens = tokenize(normalize_formula(args.query))
@@ -175,9 +176,18 @@ def main():
     llm = GeminiClient()
     context_desc = build_context_description(getattr(retriever, "chunks", []))
     agent = DDExpertAgent(retriever, embedder, llm, context_desc)
+    llm.begin_request()  # reset per-request LLM stats
     dd_result = agent.run(args.query)
     print("\nAnswer:\n")
     print(render_formula_answer(dd_result["answer"]))
+
+    stats = llm.request_stats()
+    total_s = round(time.time() - t0, 2)
+    print(
+        f"\n[REQUEST STATS] llm_calls={stats['llm_calls']} | "
+        f"llm_time={stats['llm_time_s']}s | total_time={total_s}s "
+        f"(non-llm={round(total_s - stats['llm_time_s'], 2)}s)"
+    )
 
 
 if __name__ == "__main__":
