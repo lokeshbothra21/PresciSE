@@ -1,0 +1,12 @@
+# Pinned, coherent dependency set for the ISOLATED ragas eval venv.
+# RAGAS's stable line needs the langchain 0.2.x ecosystem (it imports a
+# langchain_community shim removed in 0.3+), which conflicts with the app's
+# langchain 1.x. That's why scoring runs in its own venv, decoupled from the
+# app via a predictions file. See evals/README.md.
+ragas==0.2.14
+langchain-core==0.2.43
+langchain==0.2.17
+langchain-community==0.2.19
+langchain-openai==0.1.25
+langchain-google-genai==1.0.10
+python-dotenv

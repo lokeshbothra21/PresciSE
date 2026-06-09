@@ -1,0 +1,42 @@
+[
+  {
+    "question": "What are the three main components of liquid electrolytes?",
+    "ground_truth": "Liquid electrolytes are primarily composed of solvents, salts, and additives."
+  },
+  {
+    "question": "According to frontier molecular orbital theory, what do the LUMO and HOMO energy levels determine for an electrolyte molecule?",
+    "ground_truth": "The LUMO energy determines the molecule's reduction potential, which governs stability on the anode side, while the HOMO energy is associated with the oxidation potential, dictating high-voltage stability on the cathode side."
+  },
+  {
+    "question": "What roles do the SEI and CEI play in a lithium battery?",
+    "ground_truth": "The solid electrolyte interphase (SEI) forms on the anode, suppressing lithium dendrite growth and protecting the active lithium; the cathode-electrolyte interphase (CEI) protects the lattice stability of the cathode during repeated Li+ insertion and extraction and prevents continuous oxidative decomposition of the electrolyte."
+  },
+  {
+    "question": "How does the Transformer's self-attention mechanism differ from GNNs in modeling relationships between nodes?",
+    "ground_truth": "GNNs propagate information only along graph edges, creating a local bias that limits the modeling of long-range relationships between distant nodes; the Transformer abandons fixed topology via self-attention, treating the data as a fully connected whole and directly associating any two nodes regardless of distance, giving it a global receptive field."
+  },
+  {
+    "question": "What does Principal Component Analysis (PCA) do and how does it work?",
+    "ground_truth": "PCA performs dimensionality reduction by constructing a low-dimensional subspace from the top N orthogonal principal components that capture the maximum variance in mean-centered data, compressing information while preserving the core variability and reducing computational complexity."
+  },
+  {
+    "question": "In Q-learning, what do the learning rate (alpha) and discount factor (gamma) control?",
+    "ground_truth": "The learning rate alpha controls how fast new observations overwrite old values in the state-action value function, while the discount factor gamma balances the importance of immediate rewards against long-term returns."
+  },
+  {
+    "question": "What are the four research paradigms in materials science described in the review?",
+    "ground_truth": "They are the empirical trial-and-error paradigm; the theory-driven paradigm that summarizes laws and mathematical expressions; the computer-simulation paradigm (quantum chemistry, first-principles, molecular dynamics, phase field, and finite element methods); and the data-driven paradigm represented by machine learning."
+  },
+  {
+    "question": "What is the MolMapNet molecular representation method?",
+    "ground_truth": "MolMapNet encodes 1456 molecular descriptors and 16,204 fingerprint features of a molecule into a 2D picture (map); using this representation it outperformed graph-based and other existing models across 26 benchmark datasets."
+  },
+  {
+    "question": "What two polymer routes are described for solid-state polymer electrolytes (SPE)?",
+    "ground_truth": "Polyethylene oxide (PEO)-based systems, in which Li ions undergo dissociation-complexation with O atoms on chain segments in amorphous regions, and PVDF-based electrolytes, in which flexible segments reduce local crystallinity to form fast Li+ transport channels."
+  },
+  {
+    "question": "What is the GeoMix framework designed to do?",
+    "ground_truth": "GeoMix is a geometry-aware framework that extends E(3)-equivariant neural networks (EGNN) and tensor field networks (TFN) to multicomponent mixture systems, encoding mixed components to predict ionic conductivity while preserving equivariance."
+  }
+]

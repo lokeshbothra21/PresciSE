@@ -355,7 +355,11 @@ class DDExpertAgent:
         formula_score = next(
             (scores.get(k, 0) for k, p in priorities.items() if p == 2), 0
         )
-        show_caveat = (formula_score == 0) and (overall_pct < 50.0)
+        # Only caveat when the answer is GENUINELY incomplete — not merely
+        # because no formula was found. Conceptual questions legitimately have
+        # no formula, and a formula-centric disclaimer there is noise (and reads
+        # as evasive). Driven by overall coverage alone now.
+        show_caveat = overall_pct < 35.0
 
         qa_text = _format_qa_pairs(state["expert_qa"])
         prompt = DD_SYNTHESIZE_PROMPT.format(

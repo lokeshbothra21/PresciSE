@@ -441,3 +441,13 @@ def delete_chunks_for_doc(doc_id: str) -> None:
 def count_chunks() -> int:
     with session_scope() as s:
         return s.execute(select(func.count(Chunk.chunk_id))).scalar() or 0
+
+
+def count_chunks_for_owner(owner_user_id: str) -> int:
+    with session_scope() as s:
+        return (
+            s.execute(
+                select(func.count(Chunk.chunk_id)).where(Chunk.owner_user_id == owner_user_id)
+            ).scalar()
+            or 0
+        )

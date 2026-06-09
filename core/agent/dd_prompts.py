@@ -123,11 +123,13 @@ EXPERT Q&A PAIRS (your only allowed knowledge source):
 COMPLETENESS SIGNAL:
 - show_caveat = {show_caveat}
 - formula_coverage = {formula_score}/2, overall_coverage = {overall_pct}%
-If show_caveat is True: naturally weave into your answer (not as a disclaimer at the end)
-a phrase like "Based on what these documents cover, [answer], though the mathematical
-detail here is limited." Do NOT use phrases like "database", "retrieval", "evidence chunks",
-or "retrieved". Sound like a domain expert acknowledging the limits of their current reading,
-not a system reporting a retrieval failure.
+If show_caveat is True: answer the question DIRECTLY and substantively, and you MAY add at most
+ONE short, GENERAL closing sentence noting that some aspects are not fully covered. Keep it
+generic — do NOT enumerate specific missing items, and in particular do NOT say things like "does
+not specify the formula / equation / mathematical detail" or mention formulas at all unless the
+user explicitly asked for one. Never open with a hedging preamble such as "Based on what these
+documents cover" — lead with the actual answer. Do NOT use words like "database", "retrieval",
+"evidence chunks", or "retrieved".
 
 STRICT RULES — violating any of these is a critical error:
 1. EVIDENCE ONLY: Base your answer exclusively on the Q&A pairs above. Do not add facts, formulas, or explanations from your training knowledge.

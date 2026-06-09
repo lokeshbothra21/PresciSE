@@ -10,6 +10,7 @@ venv/
 env/
 ENV/
 .venv
+.venv-ragas
 
 # Environment variables (contains API keys!)
 .env
@@ -53,6 +54,10 @@ facebook/
 # Test run artifacts
 test_results/
 .pytest_cache/
+
+# Eval run outputs (predictions + scores are regenerated)
+evals/predictions*.jsonl
+evals/ragas_scores*.csv
 
 # Ad-hoc debug/scratch dumps
 debug_output.txt
