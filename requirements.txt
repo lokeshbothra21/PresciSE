@@ -17,10 +17,11 @@ faiss-cpu==1.13.2  # swap for faiss-gpu on a CUDA box if desired
 sentence-transformers==5.4.1
 
 # LLM orchestration
-langchain==1.2.18
-langgraph==1.1.10
+langchain==1.3.4
+langgraph==1.2.4
 langchain-google-genai==4.2.2  # Gemini integration for LangChain
 google-genai==1.75.0
+deepagents==0.6.8  # Autonomous agent harness on top of langgraph (planning, tools, subagents)
 
 # Embeddings / models
 torch==2.11.0
