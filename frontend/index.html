@@ -949,6 +949,17 @@ function renderLoadingBubble() {
   return row;
 }
 
+function updateLoadingProgress(loadingRow, msg) {
+  if (!loadingRow || !msg) return;
+  const b = loadingRow.querySelector('#loading-bubble');
+  if (!b) return;
+  b.innerHTML = `
+    <div class="bubble-label">PresciSE</div>
+    <div class="progress-status" style="opacity:.7;font-size:.9em;margin:4px 0;">${escHtml(msg)}</div>
+    <div class="loading-dots"><span></span><span></span><span></span></div>`;
+  scrollBottom();
+}
+
 function renderAIMessage(data, loadingRow) {
   const answer   = preprocessAnswer(data.answer || '');
   const rendered = marked.parse(answer);
@@ -990,6 +1001,54 @@ function renderAIMessage(data, loadingRow) {
   }
 
   scrollBottom();
+}
+
+function renderStreamingAnswer(data, loadingRow) {
+  // P2 v2 — reveal the answer progressively (typewriter) instead of all at once.
+  // Types plain text while streaming, then swaps to fully rendered markdown +
+  // sources at the end (so partial markdown is never shown raw).
+  const answer  = data.answer || '';
+  const sources = data.sources || [];
+
+  const bubble = document.createElement('div');
+  bubble.className = 'bubble ai';
+  bubble.innerHTML = `<div class="bubble-label">PresciSE</div>
+    <div class="md-content stream-text" style="white-space:pre-wrap;"></div>`;
+  const row = document.createElement('div');
+  row.className = 'msg-row ai';
+  row.appendChild(bubble);
+  if (loadingRow) loadingRow.replaceWith(row);
+  else document.getElementById('messages').appendChild(row);
+
+  const target = bubble.querySelector('.stream-text');
+  const tokens = answer.split(/(\s+)/);   // words, whitespace preserved
+  let i = 0;
+  const STEP = 4;                          // words revealed per tick
+
+  function finalize() {
+    const rendered    = marked.parse(preprocessAnswer(answer));
+    const sourcesHtml = buildSourcesHtml(sources);
+    bubble.innerHTML  = `<div class="bubble-label">PresciSE</div>
+      <div class="md-content">${rendered}</div>${sourcesHtml}`;
+    const toggle = bubble.querySelector('.sources-toggle');
+    const body   = bubble.querySelector('.sources-body');
+    if (toggle && body) toggle.addEventListener('click', () => {
+      const open = body.classList.toggle('open');
+      toggle.classList.toggle('open', open);
+    });
+    scrollBottom();
+  }
+
+  function tick() {
+    if (i >= tokens.length) { finalize(); return; }
+    target.textContent += tokens.slice(i, i + STEP).join('');
+    i += STEP;
+    scrollBottom();
+    setTimeout(tick, 15);
+  }
+
+  if (!answer) { finalize(); return; }
+  tick();
 }
 
 function renderErrorBubble(msg, loadingRow) {
@@ -1068,7 +1127,7 @@ async function sendQuery(query) {
   const loadingRow = renderLoadingBubble();
 
   try {
-    const res = await fetch('/api/query', {
+    const res = await fetch('/api/query/stream', {
       method: 'POST',
       headers: uHeaders({ 'Content-Type': 'application/json' }),
       body: JSON.stringify({ query, session_id: sessionId }),
@@ -1084,9 +1143,41 @@ async function sendQuery(query) {
       return;
     }
 
-    const data = await res.json();
-    sessionId = data.session_id;
-    renderAIMessage(data, loadingRow);
+    // Consume the Server-Sent Events stream: live progress, then the final answer.
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    let buf = '', answered = false, streaming = true;
+    while (streaming) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buf += decoder.decode(value, { stream: true });
+      let sep;
+      while ((sep = buf.indexOf('\n\n')) !== -1) {
+        const blockText = buf.slice(0, sep);
+        buf = buf.slice(sep + 2);
+        let event = 'message', data = '';
+        blockText.split('\n').forEach(line => {
+          if (line.startsWith('event:')) event = line.slice(6).trim();
+          else if (line.startsWith('data:')) data += line.slice(5).trim();
+        });
+        if (event === 'progress') {
+          try { updateLoadingProgress(loadingRow, JSON.parse(data).message); } catch {}
+        } else if (event === 'answer') {
+          const d = JSON.parse(data);
+          sessionId = d.session_id || sessionId;
+          renderStreamingAnswer(d, loadingRow);
+          answered = true;
+        } else if (event === 'error') {
+          let m = 'An error occurred.';
+          try { m = JSON.parse(data).message; } catch {}
+          renderErrorBubble(m, loadingRow);
+          answered = true;
+        } else if (event === 'done') {
+          streaming = false;
+        }
+      }
+    }
+    if (!answered) renderErrorBubble('No answer was returned.', loadingRow);
 
   } catch (e) {
     renderErrorBubble('Network error — is the server running?', loadingRow);

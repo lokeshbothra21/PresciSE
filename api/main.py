@@ -29,6 +29,7 @@ from typing import Any
 
 from fastapi import Depends, FastAPI, File, HTTPException, Request, Security, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
 from fastapi.security import APIKeyHeader
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
@@ -481,6 +482,105 @@ async def query_endpoint(req: QueryRequest, request: Request, user_id: str = Dep
         router_decision=router_decision,
         session_id=session_id,
         timestamp=timestamp,
+    )
+
+
+@app.post("/api/query/stream", dependencies=[Depends(require_api_key)])
+async def query_stream_endpoint(
+    req: QueryRequest, request: Request, user_id: str = Depends(current_user_id)
+):
+    """Streaming variant of /api/query (Server-Sent Events / P2).
+
+    Emits `event: progress` lines as the agent plans / searches / reranks, then a
+    single `event: answer` with the final answer + sources, then `event: done`.
+    Lets the UI show live status during the (multi-second) retrieval instead of a
+    blank wait. Sources come from the agent's own retrieved chunks (no extra search).
+    """
+    if len(req.query) > MAX_QUERY_LEN:
+        raise HTTPException(status_code=400, detail=f"Query too long (max {MAX_QUERY_LEN} chars).")
+    if not req.query.strip():
+        raise HTTPException(status_code=400, detail="Query cannot be empty.")
+
+    session_id = req.session_id or str(uuid.uuid4())
+    request_id = getattr(request.state, "request_id", "-")
+    allowed_owners = {user_id, SHARED_OWNER}
+
+    import queue as _queue
+
+    events: "_queue.Queue" = _queue.Queue()
+    _SENTINEL = object()
+
+    def _on_progress(msg: str) -> None:
+        events.put(("progress", {"message": msg}))
+
+    def _worker() -> None:
+        from loguru import logger
+
+        t0 = time.time()
+        try:
+            _llm.begin_request()
+            history: list[dict] = []
+            try:
+                prior = db.get_session_messages(user_id, session_id) or []
+                _n = int(os.getenv("PRESCISE_HISTORY_TURNS", "4"))
+                history = [{"question": m["query"], "answer": m["answer"]} for m in prior][-_n:]
+            except Exception:  # noqa: BLE001
+                history = []
+
+            result = _agent.run(
+                req.query, allowed_owners=allowed_owners, history=history, on_progress=_on_progress
+            )
+            answer = result["answer"]
+            # Build sources in the SAME shape as /api/query (SourceItem), deduped
+            # by chunk and best-score-first, so the frontend renders them identically.
+            _seen, _items = set(), []
+            for _it in sorted(result.get("all_retrieved_chunks", []), key=lambda x: -float(x.get("score", 0.0))):
+                _cid = (_it.get("chunk") or {}).get("chunk_id")
+                if _cid in _seen:
+                    continue
+                _seen.add(_cid)
+                _items.append(_it)
+                if len(_items) >= 12:
+                    break
+            src_dicts = [_chunk_to_source(_it).model_dump() for _it in _items]
+
+            try:
+                db.add_message(
+                    user_id=user_id, session_id=session_id, query=req.query,
+                    answer=answer, sources=src_dicts, router={},
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(f"[QUERY STREAM] history save failed: {type(exc).__name__}: {exc}")
+
+            stats = _llm.request_stats()
+            logger.info(
+                f"[REQUEST STATS] request_id={request_id} | llm_calls={stats['llm_calls']} | "
+                f"llm_time={stats['llm_time_s']}s | total_time={round(time.time() - t0, 2)}s | "
+                f"stream | query={req.query[:60]!r}"
+            )
+            events.put(("answer", {"answer": answer, "sources": src_dicts, "session_id": session_id}))
+        except Exception as exc:  # noqa: BLE001
+            logger.error(f"[QUERY STREAM] failed: {type(exc).__name__}: {exc}")
+            events.put(("error", {"message": "The request failed. Please try again."}))
+        finally:
+            events.put((_SENTINEL, None))
+
+    loop = asyncio.get_event_loop()
+    loop.run_in_executor(None, _worker)
+
+    async def _event_stream():
+        yield f"event: progress\ndata: {json.dumps({'message': 'Starting…'})}\n\n"
+        while True:
+            kind, payload = await loop.run_in_executor(None, events.get)
+            if kind is _SENTINEL:
+                yield "event: done\ndata: {}\n\n"
+                break
+            yield f"event: {kind}\ndata: {json.dumps(payload)}\n\n"
+
+    return StreamingResponse(
+        _event_stream(),
+        media_type="text/event-stream",
+        headers={"X-Request-ID": request_id, "Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
 
 

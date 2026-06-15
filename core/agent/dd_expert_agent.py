@@ -18,7 +18,7 @@ import math
 import os
 import warnings
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 from langchain.tools import ToolRuntime, tool
 from langgraph.errors import GraphRecursionError
@@ -62,6 +62,7 @@ class _RunState:
     all_retrieved_chunks: List[Dict[str, Any]] = field(default_factory=list)
     retrieval_count: int = 0
     best_rerank_score: float = 0.0  # max reranker confidence seen this run (T2)
+    progress: Optional[Callable[[str], None]] = None  # streaming progress hook (P2)
 
 
 @dataclass
@@ -78,6 +79,15 @@ class AgentContext:
 # ---------------------------------------------------------------------------
 # Helpers (reused from the previous implementation)
 # ---------------------------------------------------------------------------
+
+def _emit(ctx, msg: str) -> None:
+    """Best-effort progress callback for streaming (P2). Never raises."""
+    try:
+        if ctx is not None and ctx.run_state is not None and ctx.run_state.progress:
+            ctx.run_state.progress(msg)
+    except Exception:  # noqa: BLE001
+        pass
+
 
 def _relevance_note(items: List[Dict[str, Any]], min_score: float):
     """Independent weak-evidence signal from the reranker (T2).
@@ -268,6 +278,7 @@ class DDExpertAgent:
                         f"write your final synthesized answer now from what you have.)"
                     )
 
+            _emit(ctx, f"Searching the documents for: {subquestion[:70]}")
             try:
                 import time as _t
                 tokens = tokenize(subquestion)
@@ -293,6 +304,7 @@ class DDExpertAgent:
             # surface them as sources alongside the final answer.
             if ctx is not None:
                 ctx.run_state.all_retrieved_chunks.extend(items)
+            _emit(ctx, f"Reviewed {len(items)} passages")
 
             # T2: independent weak-evidence signal from the reranker score.
             note, conf = _relevance_note(items, _RERANK_MIN_SCORE)
@@ -310,6 +322,7 @@ class DDExpertAgent:
             ctx: AgentContext = runtime.context
             if ctx is not None:
                 ctx.run_state.expert_qa.append({"question": subquestion, "answer": answer})
+            _emit(ctx, f"Drafted an answer for: {subquestion[:70]}")
             return "recorded"
 
         system_prompt = SYSTEM_PROMPT.format(context_description=self.context_description)
@@ -336,6 +349,7 @@ class DDExpertAgent:
         query: str,
         allowed_owners: Optional[set] = None,
         history: Optional[List[Dict[str, str]]] = None,
+        on_progress: Optional[Callable[[str], None]] = None,
     ) -> Dict[str, Any]:
         """Run the agent for one query.
 
@@ -360,6 +374,11 @@ class DDExpertAgent:
             }
 
         owners = frozenset(allowed_owners) if allowed_owners is not None else None
+        if on_progress:
+            try:
+                on_progress("Planning your question…")
+            except Exception:  # noqa: BLE001
+                pass
 
         # Per-user, freshly-computed corpus list, injected into the prompt at run
         # time (not baked into the system prompt at build). Fixes two issues: the
@@ -399,7 +418,7 @@ class DDExpertAgent:
         _ATTEMPTS = 2
         for attempt in range(1, _ATTEMPTS + 1):
             last = attempt == _ATTEMPTS
-            run_state = _RunState()
+            run_state = _RunState(progress=on_progress)
             context = AgentContext(allowed_owners=owners, run_state=run_state)
 
             try:
