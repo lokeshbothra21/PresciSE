@@ -14,7 +14,9 @@ evals/generate_predictions.py) need no changes.
 
 from __future__ import annotations
 
+import math
 import os
+import warnings
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
@@ -24,12 +26,25 @@ from loguru import logger
 
 from core.agent.dd_prompts import SYSTEM_PROMPT
 
+# deepagents/langgraph serialize the AgentContext when snapshotting graph state,
+# which emits noisy (harmless) "Pydantic serializer warnings" on every step.
+warnings.filterwarnings("ignore", message="Pydantic serializer warnings", category=UserWarning)
 
-# Soft cap on the number of tool-calling cycles the agent can take per query.
-# LangGraph's default recursion_limit is 25; we set it higher to comfortably
-# accommodate 3–6 subquestions × (retrieve + record_answer) plus refinement
-# rounds, without letting a runaway loop tie up the worker.
-_RECURSION_LIMIT = 60
+
+# Bound on the number of tool-calling cycles per query (LangGraph
+# recursion_limit). A healthy 3–4 subquestion run is ~20-30 graph steps
+# (each model call + each tool call counts as a step). 40 gives headroom for
+# a couple of refinement retries while ensuring a runaway retrieve loop is
+# cut off — and recovered via fallback synthesis — in seconds, not minutes.
+# (gemini-3.5-flash tends to over-retrieve; a higher limit just wastes
+# wall-clock before the recovery path kicks in.)
+_RECURSION_LIMIT = 40
+
+# T2 — abstention threshold. A subquestion's evidence is flagged "low relevance"
+# when the top reranked match's confidence (sigmoid of the cross-encoder score)
+# falls below this. Soft signal: the model is told to abstain rather than guess,
+# but evidence is not dropped. Tune per reranker via PRESCISE_RERANK_MIN_SCORE.
+_RERANK_MIN_SCORE = float(os.getenv("PRESCISE_RERANK_MIN_SCORE", "0.30"))
 
 
 # ---------------------------------------------------------------------------
@@ -46,6 +61,7 @@ class _RunState:
     expert_qa: List[Dict[str, str]] = field(default_factory=list)
     all_retrieved_chunks: List[Dict[str, Any]] = field(default_factory=list)
     retrieval_count: int = 0
+    best_rerank_score: float = 0.0  # max reranker confidence seen this run (T2)
 
 
 @dataclass
@@ -62,6 +78,30 @@ class AgentContext:
 # ---------------------------------------------------------------------------
 # Helpers (reused from the previous implementation)
 # ---------------------------------------------------------------------------
+
+def _relevance_note(items: List[Dict[str, Any]], min_score: float):
+    """Independent weak-evidence signal from the reranker (T2).
+
+    Returns (note, confidence). ``confidence`` = sigmoid(top rerank score) in
+    (0,1), or None when items carry no rerank_score (reranking off / failed).
+    ``note`` is a non-empty 'low relevance' prefix only when confidence < min_score.
+    """
+    if not items:
+        return "", None
+    top = items[0].get("rerank_score")
+    if top is None:
+        return "", None
+    conf = 1.0 / (1.0 + math.exp(-float(top)))
+    if conf < min_score:
+        note = (
+            f"(LOW RELEVANCE — best match scored {conf:.2f}/1.00. The corpus may not "
+            f"cover this subquestion. If the evidence below does not clearly answer "
+            f"it, say the documents don't cover it rather than guessing, and do not "
+            f"re-retrieve the same subquestion.)\n"
+        )
+        return note, conf
+    return "", conf
+
 
 def _selection_reason(item: Dict[str, Any]) -> str:
     """Classify a retrieved chunk by which signal drove its selection."""
@@ -109,7 +149,9 @@ def _format_evidence(items: List[Dict[str, Any]]) -> str:
             text = chunk.get("text", "")
 
         lines.append(f"  [{rank}] {citation}\n  {text}")
-    return "\n\n".join(lines)
+    # Wrap in delimiters so the model treats this as untrusted DATA, not
+    # instructions (prompt-injection isolation — see SYSTEM_PROMPT "SECURITY").
+    return "<untrusted_evidence>\n" + "\n\n".join(lines) + "\n</untrusted_evidence>"
 
 
 # ---------------------------------------------------------------------------
@@ -132,8 +174,9 @@ class DDExpertAgent:
 
     # Max retrieve_evidence calls per query. Bounds the retrieve→refine loop so
     # an open-ended question can't thrash until it hits the recursion limit.
-    # Comfortably covers 3–6 subquestions plus a couple of refinements.
-    _RETRIEVAL_CAP = 10
+    # Covers 3–4 subquestions plus a refinement or two; past this the tool
+    # refuses and tells the model to synthesize from what it has.
+    _RETRIEVAL_CAP = int(os.getenv("PRESCISE_MAX_RETRIEVALS", "6"))
 
     def __init__(
         self,
@@ -226,13 +269,24 @@ class DDExpertAgent:
                     )
 
             try:
+                import time as _t
                 tokens = tokenize(subquestion)
+                _e0 = _t.time()
                 embedding = embedder.embed_text(subquestion)
+                _embed_s = _t.time() - _e0
+                _r0 = _t.time()
                 items = retriever.retrieve_with_formulas(
-                    tokens, embedding, top_k=top_k, allowed_owners=allowed_owners
+                    tokens, embedding, top_k=top_k, allowed_owners=allowed_owners,
+                    query_str=subquestion,
+                )
+                logger.info(
+                    f"[AGENT TOOL] retrieve_evidence timing: embed={_embed_s:.2f}s "
+                    f"retrieve+rerank={_t.time() - _r0:.2f}s ({len(items)} items)"
                 )
             except Exception as exc:  # noqa: BLE001
-                logger.warning(f"[AGENT TOOL] retrieve_evidence failed: {exc}")
+                logger.warning(
+                    f"[AGENT TOOL] retrieve_evidence failed: {type(exc).__name__}: {exc}"
+                )
                 return "(retrieval temporarily unavailable for this subquestion)"
 
             # Push every chunk into the per-run accumulator so the API can
@@ -240,7 +294,11 @@ class DDExpertAgent:
             if ctx is not None:
                 ctx.run_state.all_retrieved_chunks.extend(items)
 
-            return _format_evidence(items)
+            # T2: independent weak-evidence signal from the reranker score.
+            note, conf = _relevance_note(items, _RERANK_MIN_SCORE)
+            if conf is not None and ctx is not None:
+                ctx.run_state.best_rerank_score = max(ctx.run_state.best_rerank_score, conf)
+            return note + _format_evidence(items)
 
         @tool
         def record_answer(subquestion: str, answer: str, runtime: ToolRuntime) -> str:
@@ -273,7 +331,12 @@ class DDExpertAgent:
     # Public API
     # ------------------------------------------------------------------
 
-    def run(self, query: str, allowed_owners: Optional[set] = None) -> Dict[str, Any]:
+    def run(
+        self,
+        query: str,
+        allowed_owners: Optional[set] = None,
+        history: Optional[List[Dict[str, str]]] = None,
+    ) -> Dict[str, Any]:
         """Run the agent for one query.
 
         Args:
@@ -298,6 +361,33 @@ class DDExpertAgent:
 
         owners = frozenset(allowed_owners) if allowed_owners is not None else None
 
+        # Per-user, freshly-computed corpus list, injected into the prompt at run
+        # time (not baked into the system prompt at build). Fixes two issues: the
+        # build-time description was GLOBAL (could leak other users' filenames
+        # into the prompt) and went STALE after new uploads. getattr default
+        # keeps test stubs without a .chunks attribute working.
+        from core.agent.context_builder import build_context_description
+        corpus_desc = build_context_description(
+            getattr(self.retriever, "chunks", []), allowed_owners=owners
+        )
+        user_content = (
+            "Documents indexed and available to you (the current user's corpus):\n"
+            f"{corpus_desc}\n\nQuestion: {query}"
+        )
+
+        # P1: prepend prior conversation turns so follow-up questions ("what about
+        # at higher temperature?") resolve against the session's context. Capped
+        # by the caller (api passes the last few turns).
+        messages: List[Dict[str, str]] = []
+        for turn in (history or []):
+            q = (turn.get("question") or "").strip()
+            a = (turn.get("answer") or "").strip()
+            if q:
+                messages.append({"role": "user", "content": q})
+            if a:
+                messages.append({"role": "assistant", "content": a})
+        messages.append({"role": "user", "content": user_content})
+
         # Gemini sporadically returns MALFORMED_FUNCTION_CALL on the very
         # first turn, which yields an empty AIMessage and an agent run with
         # nothing retrieved and nothing recorded. That's unrecoverable by the
@@ -314,7 +404,7 @@ class DDExpertAgent:
 
             try:
                 result = self._agent.invoke(
-                    {"messages": [{"role": "user", "content": query}]},
+                    {"messages": messages},
                     context=context,
                     config={"recursion_limit": _RECURSION_LIMIT},
                 )
@@ -375,6 +465,7 @@ class DDExpertAgent:
             # have everything needed — recover with one direct synthesis call
             # instead of surfacing an apology.
             answer = self._fallback_synthesis(query, run_state)
+        answer = self._maybe_verify(answer, run_state)
         return {
             "answer": answer,
             "expert_qa": run_state.expert_qa,
@@ -417,6 +508,62 @@ class DDExpertAgent:
                 "Here is what I found on each aspect of your question:\n\n"
                 + "\n\n".join(parts)
             )
+
+    def _maybe_verify(self, answer: str, run_state: "_RunState") -> str:
+        """T1 — optional answer-time faithfulness check.
+
+        Off unless PRESCISE_ENABLE_FAITHFULNESS_CHECK=1 (it adds one LLM call).
+        Grades whether the answer's claims are supported by the retrieved
+        evidence; if not, appends a soft caveat. Never raises — verification
+        must never break the answer.
+        """
+        if os.getenv("PRESCISE_ENABLE_FAITHFULNESS_CHECK", "0") != "1":
+            return answer
+        if not answer or not run_state.all_retrieved_chunks:
+            return answer
+
+        seen, parts, total = set(), [], 0
+        for it in run_state.all_retrieved_chunks:
+            ch = it.get("chunk", {})
+            cid = ch.get("chunk_id")
+            if cid in seen:
+                continue
+            seen.add(cid)
+            if ch.get("chunk_type") == "formula":
+                t = ch.get("latex_formula") or ch.get("normalized_formula") or ch.get("text", "")
+            else:
+                t = ch.get("text", "")
+            t = (t or "").strip()
+            if not t:
+                continue
+            parts.append(t)
+            total += len(t)
+            if total > 6000:  # bound the verifier's context/cost
+                break
+        if not parts:
+            return answer
+
+        from core.agent.dd_prompts import FAITHFULNESS_CHECK_PROMPT
+
+        try:
+            raw = self.llm.generate(
+                FAITHFULNESS_CHECK_PROMPT.format(answer=answer, evidence="\n\n".join(parts)),
+                max_output_tokens=120,
+            ).strip()
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(f"[FAITHFULNESS] check failed ({type(exc).__name__}); skipping")
+            return answer
+
+        if raw.upper().startswith("UNSUPPORTED"):
+            reason = raw.split(":", 1)[1].strip() if ":" in raw else ""
+            logger.info(f"[FAITHFULNESS] flagged unsupported: {reason or '(unspecified)'}")
+            return (
+                answer
+                + "\n\n_Note: an automated check flagged that some statements above may "
+                "not be fully supported by the provided documents — please verify against "
+                "the cited sources._"
+            )
+        return answer
 
 
 # ---------------------------------------------------------------------------

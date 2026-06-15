@@ -24,9 +24,17 @@ class HybridRetriever:
         faiss_weight: float = 0.4,
         formula_weight: float = 0.5,
         formula_threshold: float = 0.15,
+        reranker=None,
     ):
         self.chunks = chunks
         self.formula_chunks = formula_chunks or []
+
+        # Optional cross-encoder reranker (set here or assigned post-construction
+        # by the API wiring). When present, retrieve_with_formulas fetches a wide
+        # candidate pool and reranks it to top_k. Pool sizes are env-tunable.
+        self.reranker = reranker
+        self.rerank_text_pool = int(os.getenv("PRESCISE_RERANK_TEXT_POOL", "25"))
+        self.rerank_formula_pool = int(os.getenv("PRESCISE_RERANK_FORMULA_POOL", "15"))
 
         self.bm25_top_k = bm25_top_k
         self.faiss_top_k = faiss_top_k
@@ -150,6 +158,20 @@ class HybridRetriever:
 
         if faiss is None or bm25 is None or not chunks:
             return []
+
+        # Guard against an embedding-model / index dimension mismatch — e.g. the
+        # embedder was switched to gemini-embedding-001 (3072-dim) but the index
+        # still holds SPECTER (768-dim) vectors. Without this, FAISS fails with a
+        # cryptic/empty AssertionError; here we say exactly how to fix it.
+        if query_embedding is not None:
+            stored = chunks[0].get("embedding")
+            if stored and len(query_embedding) != len(stored):
+                raise ValueError(
+                    f"Query embedding dim {len(query_embedding)} != index dim {len(stored)}. "
+                    "The embedding model changed since indexing — run "
+                    "`python -m scripts.reembed` and restart, or set PRESCISE_EMBED_MODEL "
+                    "back to the model the index was built with."
+                )
 
         # When scoping by owner, widen the candidate pool so a user's relevant
         # chunks aren't starved out of the top-k by other users' documents.
@@ -301,6 +323,7 @@ class HybridRetriever:
             allowed_owners=allowed_owners,
             bm25_weight=router_decision["bm25_weight"],
             faiss_weight=router_decision["faiss_weight"],
+            query_str=query_str,
         )
 
         return {
@@ -448,14 +471,31 @@ class HybridRetriever:
         allowed_owners: Optional[set] = None,
         bm25_weight: Optional[float] = None,
         faiss_weight: Optional[float] = None,
+        query_str: Optional[str] = None,
     ) -> List[Dict[str, Any]]:
         """
         Retrieve text chunks + formula chunks.
 
-        Thin wrapper over retrieve_text (SR1) + retrieve_formulas (SR2).
-        Returns 10 text + 10 formula results (20 total) regardless of top_k,
-        so the DD agent always sees a balanced evidence set.
+        With a reranker configured AND a query_str provided: fetch a WIDE
+        candidate pool (text + formula), cross-encoder rerank it against the
+        query, and return the top_k most relevant. This path HONOURS top_k (it
+        is what the DD agent uses) — fewer, higher-precision chunks reach the LLM.
+
+        Without a reranker (or no query_str): legacy behaviour — 10 text + 10
+        formula (20 total) regardless of top_k, a fixed balanced set.
         """
+        if self.reranker is not None and query_str:
+            text_pool = self.retrieve_text(
+                query_tokens, query_embedding, top_k=self.rerank_text_pool,
+                allowed_owners=allowed_owners, bm25_weight=bm25_weight, faiss_weight=faiss_weight,
+            )
+            formula_pool = self.retrieve_formulas(
+                query_tokens, query_embedding, top_k=self.rerank_formula_pool,
+                allowed_owners=allowed_owners, bm25_weight=bm25_weight, faiss_weight=faiss_weight,
+            )
+            candidates = text_pool + formula_pool
+            return self.reranker.rerank(query_str, candidates, top_k=top_k)
+
         text_results = self.retrieve_text(
             query_tokens, query_embedding, top_k=10, allowed_owners=allowed_owners,
             bm25_weight=bm25_weight, faiss_weight=faiss_weight,

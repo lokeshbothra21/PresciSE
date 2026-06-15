@@ -83,6 +83,12 @@ async def lifespan(app: FastAPI):
     # now enter via POST /api/documents. This loads any persisted index (incl.
     # previously-uploaded docs) without scanning data/pdfs or rebuilding.
     _retriever = IndexManager(PDF_DIR, INDEX_DIR).load_only()
+    # Attach the self-hosted cross-encoder reranker (bge-reranker-v2-m3) unless
+    # disabled via PRESCISE_ENABLE_RERANK=0. Lazy: the model downloads on the
+    # first query, not at startup, so boot stays fast and tests stay offline.
+    if os.getenv("PRESCISE_ENABLE_RERANK", "1") == "1":
+        from core.retrieval.reranker import Reranker
+        _retriever.reranker = Reranker()
     _llm = GeminiClient()
     context_desc = build_context_description(getattr(_retriever, "chunks", []))
     _agent = DDExpertAgent(_retriever, _embedder, _llm, context_desc)
@@ -172,7 +178,8 @@ def _chunk_to_source(item: dict) -> SourceItem:
     )
 
 
-def _run_query(query: str, allowed_owners: set | None = None, request_id: str = "-") -> tuple[str, list[dict], dict]:
+def _run_query(query: str, allowed_owners: set | None = None, request_id: str = "-",
+               session_id: str | None = None, user_id: str | None = None) -> tuple[str, list[dict], dict]:
     """Synchronous ML pipeline — called inside thread pool.
 
     allowed_owners scopes retrieval to a user's documents (+ shared). None =
@@ -203,12 +210,22 @@ def _run_query(query: str, allowed_owners: set | None = None, request_id: str = 
         router_decision = main_result["router_decision"]
         representative_chunks = list(main_result["results"])
     except Exception as exc:  # noqa: BLE001
-        logger.warning(f"[QUERY] representative retrieval failed (non-fatal): {exc}")
+        logger.warning(f"[QUERY] representative retrieval failed (non-fatal): {type(exc).__name__}: {exc}")
+
+    # Prior turns for this session → conversational follow-up resolution (P1).
+    history: list[dict] = []
+    if session_id and user_id:
+        try:
+            prior = db.get_session_messages(user_id, session_id) or []
+            _n = int(os.getenv("PRESCISE_HISTORY_TURNS", "4"))
+            history = [{"question": m["query"], "answer": m["answer"]} for m in prior][-_n:]
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(f"[QUERY] could not load history (non-fatal): {type(exc).__name__}: {exc}")
 
     # Run DD+Expert agent (handles its own retrieval internally).
     # Return the raw answer with [FORMULA]$...$[/FORMULA] blocks intact —
     # render_formula_answer() is for terminal only; the frontend uses KaTeX.
-    result = _agent.run(query, allowed_owners=allowed_owners)
+    result = _agent.run(query, allowed_owners=allowed_owners, history=history)
     answer = result["answer"]
 
     # Per-request summary: how many LLM calls and how long it all took.
@@ -438,7 +455,7 @@ async def query_endpoint(req: QueryRequest, request: Request, user_id: str = Dep
     loop = asyncio.get_event_loop()
     try:
         answer, raw_results, router_decision = await loop.run_in_executor(
-            None, _run_query, req.query, allowed_owners, request_id
+            None, _run_query, req.query, allowed_owners, request_id, session_id, user_id
         )
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
@@ -685,6 +702,7 @@ def _extract_agent_sources(all_retrieved_chunks: list[dict]) -> list[AgentSource
 async def agent_query(
     req: AgentQueryRequest,
     _: None = Depends(require_api_key),
+    user_id: str = Depends(current_user_id),
 ):
     from loguru import logger
 
@@ -694,7 +712,10 @@ async def agent_query(
     def _run() -> tuple[dict, dict]:
         # begin_request + read stats must run in the same worker thread.
         _llm.begin_request()
-        res = _agent.run(req.query)
+        # Scope retrieval to the calling user (+ shared). Without this the
+        # agent-to-agent endpoint would return ANY user's chunks (cross-tenant
+        # leak); identity comes from X-User-Id (AURA forwards the verified id).
+        res = _agent.run(req.query, allowed_owners={user_id, SHARED_OWNER})
         return res, _llm.request_stats()
 
     loop = asyncio.get_event_loop()

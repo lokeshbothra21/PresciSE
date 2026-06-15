@@ -15,6 +15,8 @@
 | Baseline eval run | **Code-only** | Assessment is from reading source, not measured RAGAS scores; running RAGAS is a top recommendation. |
 
 > Every claim below cites the file/line I read. Aura paths are under `/home/lokeshbothra/project-aura/aura/`.
+>
+> **Revision (agent layer).** The hand-coded `StateGraph` agent has since been replaced by an autonomous **deepagents** loop (`deepagents==0.6.8`). §1 finding #1, §2.1, §2.6, §8.1, and §8.3 were re-verified and rewritten against the current `core/agent/dd_expert_agent.py` + `dd_prompts.py`. The retrieval/store/eval/integration findings are unaffected; the `top_k`, A2A-scoping, multi-turn, and prompt-injection issues all still stand (at new line numbers).
 
 ---
 
@@ -22,7 +24,7 @@
 
 **The 8 findings that matter most:**
 
-1. **PresciSE is *not* naive RAG — it's agentic.** It already does query decomposition, hybrid BM25+FAISS, intent-based weight routing, an iterative plan→retrieve→answer→evaluate→synthesize loop, and a separate formula-retrieval pipeline ([core/agent/dd_expert_agent.py:105-135](core/agent/dd_expert_agent.py#L105-L135)). The sophistication is in *orchestration*. The weakness is in the *retrieval primitives* underneath it.
+1. **PresciSE is *not* naive RAG — it's agentic.** It already does query decomposition, hybrid BM25+FAISS, intent-based weight routing, an autonomous agentic-retrieval loop — now built on the **deepagents** harness (`create_deep_agent` with `write_todos` + `retrieve_evidence` + `record_answer` tools, [core/agent/dd_expert_agent.py:268-274](core/agent/dd_expert_agent.py#L268-L274)) — and a separate formula-retrieval pipeline. The sophistication is in *orchestration*. The weakness is in the *retrieval primitives* underneath it.
 
 2. **The single biggest quality lever is the embedding model.** PresciSE embeds both passages and queries with **SPECTER** (`allenai/specter`, 768-dim, [core/embeddings/embedder.py:19](core/embeddings/embedder.py#L19)). SPECTER is a *document-level* (title+abstract) citation-similarity model with a 512-token cap — it was never trained for query→passage retrieval. Using it for 900-char chunks and for queries is an architectural mismatch that caps retrieval quality no matter how good the agent loop is.
 
@@ -55,21 +57,20 @@
 ## 2. Current RAG Assessment (per layer)
 
 ### 2.1 Overall approach / pipeline
-**What's there.** End-to-end, a query flows: `POST /api/query` → per-user `allowed_owners={user_id,"__shared__"}` ([api/main.py:437](api/main.py#L437)) → `DDExpertAgent.run()`. The agent is a LangGraph `StateGraph` ([core/agent/dd_expert_agent.py:105-127](core/agent/dd_expert_agent.py#L105-L127)):
+**What's there (updated for the deepagents refactor).** A query flows: `POST /api/query` → per-user `allowed_owners={user_id,"__shared__"}` ([api/main.py:437](api/main.py#L437)) → `DDExpertAgent.run()`. The hand-coded `StateGraph` is now **retired**; the agent is a single **autonomous deepagents agent** (`create_deep_agent`, [core/agent/dd_expert_agent.py:268-274](core/agent/dd_expert_agent.py#L268-L274)) whose LLM drives its own tool-calling loop over three tools:
+- **`write_todos`** (deepagents built-in) — plan 3–4 retrieval subquestions.
+- **`retrieve_evidence(subquestion)`** — embeds + hybrid-retrieves per subquestion, per-user scoped ([dd_expert_agent.py:202-247](core/agent/dd_expert_agent.py#L202-L247)).
+- **`record_answer(subquestion, answer)`** — logs a Q&A pair into per-run state ([dd_expert_agent.py:249-259](core/agent/dd_expert_agent.py#L249-L259)).
 
-```
-dd_plan → retrieve → expert_answer → dd_evaluate ─(loop while !satisfied & iter<5)─┐
-                          ▲─────────────────────────────────────────────────────────┘
-   (satisfied | iter≥5) → formula_plan → retrieve → expert_answer → dd_evaluate → synthesize → END
-```
-- **dd_plan** decomposes into 3–6 subquestions or flags out-of-scope ([dd_expert_agent.py:141-184](core/agent/dd_expert_agent.py#L141-L184)).
-- **retrieve** batch-embeds subquestions and retrieves per subquestion ([dd_expert_agent.py:186-214](core/agent/dd_expert_agent.py#L186-L214)).
-- **expert_answer** answers all subquestions in one batched LLM call ([dd_expert_agent.py:216-249](core/agent/dd_expert_agent.py#L216-L249)).
-- **dd_evaluate** scores 0/1/2 per subquestion and decides to iterate ([dd_expert_agent.py:251-307](core/agent/dd_expert_agent.py#L251-L307)).
-- A **forced formula round** always runs once ([dd_expert_agent.py:309-339](core/agent/dd_expert_agent.py#L309-L339)), then **synthesize** ([dd_expert_agent.py:341-387](core/agent/dd_expert_agent.py#L341-L387)).
-- Weight routing is **rule-based** (regex + spaCy NER + a small NLP classifier) in [core/retrieval/search_router.py](core/retrieval/search_router.py), not an LLM.
+The plan→retrieve→answer→synthesize *behavior* now lives in one unified `SYSTEM_PROMPT` ([core/agent/dd_prompts.py:16-116](core/agent/dd_prompts.py#L16-L116)) rather than graph edges; the model writes the final answer as its last `AIMessage`. Per-query scope + accumulators ride in an `AgentContext` dataclass delivered via `ToolRuntime` ([dd_expert_agent.py:54-62](core/agent/dd_expert_agent.py#L54-L62)); a fresh `_RunState` per `run()` isolates concurrent queries. Weight routing is still **rule-based** ([core/retrieval/search_router.py](core/retrieval/search_router.py)).
 
-So PresciSE has **agentic/iterative retrieval + query decomposition + hybrid search** — well past naive RAG. **Graceful degradation** is real: plan/synthesis failures fall back ([dd_expert_agent.py:149-152](core/agent/dd_expert_agent.py#L149-L152), [341-387](core/agent/dd_expert_agent.py#L341-L387)), and `run()` has a top-level guard ([dd_expert_agent.py:421-436](core/agent/dd_expert_agent.py#L421-L436)).
+**This is a genuine improvement over what I first reviewed.** It replaces the rigid fixed-budget graph *and* the brittle hand-rolled JSON parsing with a true agentic loop (exactly the §7.2 "agentic RAG" best practice), and it's well-guarded: a `_RETRIEVAL_CAP=6` ([dd_expert_agent.py:140](core/agent/dd_expert_agent.py#L140)), a `_RECURSION_LIMIT=40` ([dd_expert_agent.py:35](core/agent/dd_expert_agent.py#L35)), whole-loop retry ×2 on transient/empty-first-turn failures, and a `_fallback_synthesis()` that recovers the answer from recorded Q&A if the model exits without synthesizing ([dd_expert_agent.py:388-423](core/agent/dd_expert_agent.py#L388-L423)).
+
+**New weaknesses the refactor introduces (worth watching):**
+- **deepagents↔Gemini tool-calling fragility.** Gemini returns `finish_reason=MALFORMED_FUNCTION_CALL` on deepagents' full built-in roster, so the code registers a custom `HarnessProfile` excluding the filesystem/`execute`/`task` tools and disabling the general-purpose subagent ([dd_expert_agent.py:187-195](core/agent/dd_expert_agent.py#L187-L195)); even then the first turn sporadically empties — hence the ×2 retry + fallback scaffolding. Loop correctness now depends on the model reliably emitting well-formed tool calls — a real operational risk and an argument for careful model pinning (they default to `gemini-3.5-flash`, GA).
+- **Cost/latency is now LLM-driven and variable**, bounded only by the retrieval cap (6) and recursion limit (40) rather than a fixed budget; the code notes `gemini-3.5-flash` "tends to over-retrieve." This *raises* the value of the §7.2 adaptive-routing idea (a fast path for simple queries) and of cost observability (M3).
+
+So PresciSE remains **agentic + decomposition + hybrid** — now more genuinely so — with strong graceful degradation (mock short-circuit, retry, recursion/abort recovery, fallback synthesis).
 
 **What's weak / missing & the risk.**
 - **No reranking, no learned query rewriting/HyDE, no parent-document or contextual retrieval.** The router is keyword-coupled to *this* corpus (Lennard-Jones, Nosé-Hoover, GROMACS… [search_router.py:46-76](core/retrieval/search_router.py#L46-L76)) — it won't generalize to arbitrary user-uploaded papers (e.g. the battery-electrolyte PDF in the repo). *Risk: weight routing silently falls back to "exploratory" defaults for off-corpus topics; quality varies by how well the regex happens to match.*
@@ -102,15 +103,15 @@ So PresciSE has **agentic/iterative retrieval + query decomposition + hybrid sea
 **What's weak & the risk.**
 - **Min-max normalization destroys absolute relevance.** The top hit always becomes 1.0 even on a poor-match query, and scores aren't comparable across queries. *Risk: irrelevant chunks get high normalized scores when nothing is truly relevant — this is precisely what a reranker fixes.*
 - **No relevance threshold on text retrieval** (only formulas have one). The expert prompt does "chunk relevance gating" at the LLM layer as a band-aid.
-- **`top_k` bug** (finding #5): `retrieve_with_formulas` hardcodes 10+10 and ignores the caller's `top_k` ([hybrid_retriever.py:443-467](core/retrieval/hybrid_retriever.py#L443-L467)).
+- **`top_k` bug** (finding #5): `retrieve_with_formulas` hardcodes 10+10 and ignores the caller's `top_k` ([hybrid_retriever.py:443-467](core/retrieval/hybrid_retriever.py#L443-L467)); the new `retrieve_evidence` tool passes `top_k=8` ([dd_expert_agent.py:235-236](core/agent/dd_expert_agent.py#L235-L236)) but gets 20 results regardless.
 
 ### 2.6 LLM / generation
-**What's there.** Gemini **2.5 Flash-Lite**, temp 0.2, via `ChatGoogleGenerativeAI` ([core/llm/gemini_client.py:45-84](core/llm/gemini_client.py#L45-L84)); rate-limited (default **60/min**, env-tunable) and retried 3× with exponential backoff ([gemini_client.py:91-163](core/llm/gemini_client.py#L91-L163)); raises `LLMError` on failure; per-request stats feed a `[REQUEST STATS]` log line ([api/main.py:217-222](api/main.py#L217-L222)). Prompts enforce evidence-only answers, `[doc, page]` citations, and verbatim `[FORMULA]$…$[/FORMULA]` blocks ([core/agent/dd_prompts.py](core/agent/dd_prompts.py)).
+**What's there (updated).** Default model is now **`gemini-3.5-flash`** (GA; `PRESCISE_GEMINI_MODEL` override), temp 0.2, with the Gemini **thinking budget pinned** (`PRESCISE_THINKING_BUDGET`, default 256) to dodge an empty-response bug, `request_timeout=60`, `retries=2` ([core/llm/gemini_client.py:100-211](core/llm/gemini_client.py#L100-L211)). **Two rate-limit paths now coexist:** the deepagents agent calls the model *directly* via `langchain_model()` ([gemini_client.py:332-340](core/llm/gemini_client.py#L332-L340)) and is throttled by a LangChain **`InMemoryRateLimiter`** (token-bucket, `PRESCISE_RATE_LIMIT/60` req/s) attached at init; the legacy `generate()` path (used by `_fallback_synthesis` + other callers) still uses the custom limiter + 3× tenacity backoff and raises `LLMError`. A `_StatsCallback` bridges LangChain LLM events into the thread-local stats so `[REQUEST STATS]` stays accurate across both paths ([gemini_client.py:27-77](core/llm/gemini_client.py#L27-L77)). Prompts enforce evidence-only answers and verbatim `[FORMULA]$…$[/FORMULA]` blocks ([core/agent/dd_prompts.py](core/agent/dd_prompts.py)).
 
 **What's weak & the risk.**
-- **The rate limiter holds its lock across `time.sleep()`** ([gemini_client.py:101-114](core/llm/gemini_client.py#L101-L114)) — when the budget is hit, *every* concurrent request blocks, not just the over-budget one. With 7–14 calls/query and tens of users, this serializes the whole service under load.
-- **Doc drift:** the docstrings still claim "10 requests per minute" ([gemini_client.py:42](core/llm/gemini_client.py#L42), [95](core/llm/gemini_client.py#L95)) while the default is 60 — harmless but a smell; the codebase has a known habit of docs drifting from code.
-- No prompt/response caching, so identical sub-questions across iterations re-pay full LLM cost.
+- **The legacy custom limiter still holds its lock across `time.sleep()`** ([gemini_client.py:213-243](core/llm/gemini_client.py#L213-L243)) — but this now only affects the `generate()`/fallback path; the agent's hot path uses the non-blocking `InMemoryRateLimiter`. Lower-severity than before, but still a serialization point for fallback synthesis under load.
+- **Doc drift persists:** the GeminiClient docstrings still say "10 requests per minute" ([gemini_client.py:97](core/llm/gemini_client.py#L97), [217](core/llm/gemini_client.py#L217)) while the default is 60, and the module docstring still claims it "Replaces custom GeminiClient" even though both limiters now coexist — the codebase's known docs-drift habit.
+- No prompt/response caching, so repeated subquestions across a loop re-pay full LLM cost.
 
 ### 2.7 Persistence
 **What's there.** SQLAlchemy 2.0, SQLite default with WAL + FK enforcement, Postgres via URL ([core/persistence/db.py:133-156](core/persistence/db.py#L133-L156)); tables for `users/sessions/messages/documents/chunks`; embeddings as float32 BLOBs; per-user scoping enforced in every store call ([db.py:191-453](core/persistence/db.py#L191-L453)); crash reconciliation of stuck documents at startup ([db.py:333-342](core/persistence/db.py#L333-L342)). DB-as-source-of-truth is a genuinely good design choice.
@@ -274,7 +275,7 @@ Why this is the right shape for *your* answers:
 
 **Risks:**
 - **A2A scoping leak (release blocker).** `/api/agent/query` is unscoped today ([api/main.py:697](api/main.py#L697)); must be fixed before any Aura wiring. Add a test that proves cross-user isolation on the A2A path.
-- **Prompt injection via uploaded documents (untreated).** Untrusted PDF text flows verbatim into the LLM prompt with no isolation ([core/agent/dd_expert_agent.py:505-531](core/agent/dd_expert_agent.py#L505-L531)) — OWASP LLM01. Contained to the owner today, but the blast radius grows once PresciSE is an Aura tool. See §8.1; ship structural isolation in Phase 0.
+- **Prompt injection via uploaded documents (untreated).** Untrusted PDF text flows verbatim into the model's context via the `retrieve_evidence` tool result with no isolation ([core/agent/dd_expert_agent.py:89-115](core/agent/dd_expert_agent.py#L89-L115)) — OWASP LLM01. Contained to the owner today, but the blast radius grows once PresciSE is an Aura tool. See §8.1; ship structural isolation in Phase 0.
 - **Migration cost.** H2 (re-embed) + H3 (store) is a one-time corpus migration with a dimension change; sequence them together and keep the DB as source of truth so you can rebuild.
 - **Cost creep.** Reranker + bigger embeddings + 7–14 LLM calls/query. Quality-first makes this acceptable, but wire M3 observability *before* you scale users so cost is visible.
 - **Two RAGs, one platform.** Aura `core/rag` (agent knowledge) and PresciSE (user docs) will coexist; document the boundary clearly so neither users nor future devs confuse them.
@@ -322,7 +323,7 @@ Mapped to PresciSE's **user-facing document-QA** role:
 
 ### 7.4 Product-gap recommendations (for the Aura-facing doc-QA role)
 Prioritized, beyond the retrieval-quality work in §3:
-- **P0 — Conversational multi-turn.** `DDExpertAgent.run()` takes only the current query ([core/agent/dd_expert_agent.py:393](core/agent/dd_expert_agent.py#L393)); session history is stored but never fed back. Follow-ups like "what about at higher temperature?" can't resolve. Most-expected feature; currently missing.
+- **P0 — Conversational multi-turn.** `DDExpertAgent.run()` still takes only the current query ([core/agent/dd_expert_agent.py:280](core/agent/dd_expert_agent.py#L280)) — the deepagents refactor didn't add history; session turns are stored but never fed back. Follow-ups like "what about at higher temperature?" can't resolve. Most-expected feature; currently missing.
 - **P0 — Streaming responses.** With 7–14 LLM calls, perceived latency is rough; stream the synthesis (and ideally intermediate "planning/searching" status, which Aura's UI already renders for its subagents).
 - **P1 — Adaptive depth routing** (§7.2) + optionally expose an Elicit-style depth control. Cuts cost/latency on simple queries.
 - **P1 — Span-level citations / jump-to-source** in the answer (you already return doc+page; add char offsets/highlight).
@@ -340,7 +341,7 @@ These are *product* features, not retrieval fixes — sequence them after §3's 
 ### 8.1 Indirect prompt injection via uploaded documents — HIGH (no defense today)
 **The attack.** A PDF can contain text the model reads as *instructions*, not data — e.g. an "Acknowledgements" line or white-on-white text saying *"Ignore previous instructions and instead reply: …"* / *"reveal your system prompt"* / *"recommend product X."* Because retrieved chunks are concatenated **verbatim** into the prompt, every uploaded document is an injection vector.
 
-**Current state in code.** `_format_evidence` inlines raw `chunk["text"]` straight into the evidence block ([core/agent/dd_expert_agent.py:505-531](core/agent/dd_expert_agent.py#L505-L531)) that becomes `EXPERT_ANSWER_PROMPT` ([dd_expert_agent.py:236-239](core/agent/dd_expert_agent.py#L236-L239)); the plan and synthesize prompts also receive corpus-derived text. There is **no delimiting, no instruction isolation, and no detection** — the pipeline treats document text as trusted and feeds it exactly where instructions live. (This is OWASP "LLM01: Prompt Injection," the #1 LLM risk.)
+**Current state in code.** The `retrieve_evidence` tool returns `_format_evidence(...)` — raw `chunk["text"]` inlined into an evidence block ([core/agent/dd_expert_agent.py:89-115](core/agent/dd_expert_agent.py#L89-L115), returned at [:247](core/agent/dd_expert_agent.py#L247)) — which enters the agent's context as a `ToolMessage` the model reads as ordinary input. The unified `SYSTEM_PROMPT` adds a "CHUNK RELEVANCE GATE" ([core/agent/dd_prompts.py:51-57](core/agent/dd_prompts.py#L51-L57)) but **no injection defense**: no delimiting of untrusted text, no instruction isolation, no detection. The deepagents refactor didn't change this exposure — document text still reaches the model unmarked. (OWASP "LLM01: Prompt Injection," the #1 LLM risk.)
 
 **Why it matters here.** Owner-scoping ([api/main.py:437](api/main.py#L437)) means a malicious upload mostly poisons *that user's own* answers — bad, but contained. Once PresciSE is a **tool inside Aura**, the blast radius grows: an injected instruction in a retrieved chunk could try to steer the *agent's* behaviour or coax it toward other tool calls. Even self-poisoning destroys trust ("the assistant told me to email my data somewhere").
 
@@ -356,7 +357,7 @@ These are *product* features, not retrieval fixes — sequence them after §3's 
 **Add an online grounding check** after `synthesize`: verify each claim/sentence is entailed by a cited chunk (LLM-as-judge, or a small/cheap NLI model), and flag or withhold unsupported claims; optionally attribute at sentence granularity. *Trade-off:* +1 verification call per answer — gate it (only on low-coverage answers, or sample a fraction) to bound cost, and it pairs naturally with per-user budgets if you add them. This is the mechanism that turns "sounds right" into "provably grounded."
 
 ### 8.3 Calibrated abstention / out-of-scope handling — MEDIUM
-**Current.** A binary `in_scope` flag from `dd_plan` ([dd_expert_agent.py:154-164](core/agent/dd_expert_agent.py#L154-L164)) plus a coverage-based caveat fired below 35% ([dd_expert_agent.py:362](core/agent/dd_expert_agent.py#L362)) — coarse, and **self-reported by the same LLM that writes the answer.**
+**Current.** Abstention is now governed entirely by a `SYSTEM_PROMPT` instruction — "REFUSE ONLY AFTER RETRIEVAL," and only if evidence is unrelated for *all* subquestions tried ([core/agent/dd_prompts.py:71-76](core/agent/dd_prompts.py#L71-L76)). (The old `in_scope` flag + coverage caveat were dropped in the deepagents refactor.) It remains **self-reported by the same LLM that writes the answer** — coarse and gameable by the model's own confidence.
 
 **Improve.** Use an *independent* retrieval signal for abstention: if the **top reranker score** (once H1 lands) is below a calibrated threshold, return "I don't have enough in your documents to answer that" instead of synthesizing. A confident abstention beats a fluent wrong answer — especially for scientific users — and is a large part of why NotebookLM is trusted (§7.3).
 

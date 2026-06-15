@@ -19,6 +19,12 @@ for _suffix in ("", "-wal", "-shm"):
 os.environ["PRESCISE_DATABASE_URL"] = f"sqlite:///{_TMP_DB}"
 os.environ["PRESCISE_ENV"] = "local"
 os.environ["PRESCISE_ENABLE_VLM_BACKGROUND_SCAN"] = "0"
+# Never load the ~2GB reranker model in tests (the app attaches it at startup
+# otherwise). Reranker wiring is unit-tested separately with a fake.
+os.environ["PRESCISE_ENABLE_RERANK"] = "0"
+# Force LOCAL embeddings in tests so they stay offline (no Gemini embeddings
+# API calls). Production defaults to models/gemini-embedding-001.
+os.environ["PRESCISE_EMBED_MODEL"] = "allenai/specter"
 # Force auth open for TestClient tests. Set before api.main's load_dotenv runs;
 # load_dotenv won't override an already-set var, so a real .env key can't leak in.
 os.environ["PRESCISE_API_KEY"] = ""

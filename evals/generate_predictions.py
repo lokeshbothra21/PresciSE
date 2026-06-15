@@ -86,32 +86,30 @@ def main():
         allowed = {uid, "__shared__"}
         print(f"[{i}/{len(testset)}] {q[:70]}")
 
-        # Contexts for RAGAS = a single coherent retrieval for the ORIGINAL
-        # question (comparable, relevance-ranked scores). The agent's own
-        # accumulated cross-subquestion chunks have non-comparable scores, so
-        # their order is meaningless for the order-sensitive context metrics.
-        rep = retriever.retrieve_with_router(
-            query_tokens=tokenize(q),
-            query_embedding=embedder.embed_text(q),
-            query_str=q,
-            top_k=args.max_contexts,
-            allowed_owners=allowed,
-        )
-        seen, ctxs = set(), []
-        for it in rep["results"]:
+        # Answer comes from the full agent (its own internal retrieval).
+        res = agent.run(q, allowed_owners=allowed)
+
+        # Contexts for RAGAS = the chunks the AGENT actually retrieved while
+        # answering (deduped, best-score first). Scoring the agent's real
+        # evidence — not a separate query — keeps faithfulness and context_recall
+        # valid. (Cross-subquestion scores aren't perfectly comparable, so
+        # context_precision ORDER is approximate; the other metrics are unaffected.)
+        best: dict = {}
+        for it in res.get("all_retrieved_chunks", []):
             ch = it.get("chunk", {})
             cid = ch.get("chunk_id")
-            if cid in seen:
+            if not cid:
                 continue
-            seen.add(cid)
-            t = _chunk_text(ch).strip()
+            if cid not in best or float(it.get("score", 0.0)) > float(best[cid].get("score", 0.0)):
+                best[cid] = it
+        ctxs = []
+        for it in sorted(best.values(), key=lambda x: -float(x.get("score", 0.0))):
+            t = _chunk_text(it.get("chunk", {})).strip()
             if t:
                 ctxs.append(t)
             if len(ctxs) >= args.max_contexts:
                 break
 
-        # Answer comes from the full agent (its own internal retrieval).
-        res = agent.run(q, allowed_owners=allowed)
         rows.append({"question": q, "answer": res["answer"], "contexts": ctxs, "ground_truth": gt})
 
     os.makedirs(os.path.dirname(args.out) or ".", exist_ok=True)

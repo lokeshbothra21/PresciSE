@@ -1,0 +1,12 @@
+[
+  {
+    "question": "What is the SEI layer in a battery?",
+    "user_id": "evaluser",
+    "relevant_contains": ["solid electrolyte interphase"]
+  },
+  {
+    "question": "What are the main bottlenecks for AI in battery electrolyte development?",
+    "user_id": "evaluser",
+    "relevant_contains": ["data scarcity", "interpretability"]
+  }
+]

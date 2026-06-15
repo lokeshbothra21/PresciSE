@@ -438,6 +438,36 @@ def delete_chunks_for_doc(doc_id: str) -> None:
         s.execute(delete(Chunk).where(Chunk.doc_id == doc_id))
 
 
+def all_chunks_for_reembed() -> list[tuple[str, str, dict]]:
+    """Return (chunk_id, chunk_type, data_json) for every chunk (no embeddings).
+
+    Used by the re-embed migration (scripts/reembed.py) when the embedding model
+    changes — only the text inputs are needed to recompute vectors.
+    """
+    with session_scope() as s:
+        rows = s.execute(
+            select(Chunk.chunk_id, Chunk.chunk_type, Chunk.data_json)
+        ).all()
+        return [(r[0], r[1], dict(r[2] or {})) for r in rows]
+
+
+def update_chunk_embeddings(items: dict) -> int:
+    """Overwrite stored embeddings by chunk_id. ``items`` maps chunk_id -> vector.
+
+    The new vectors may have a different dimension than the old ones (e.g. after
+    SPECTER 768 -> gemini-embedding-001 3072); FAISS/BM25 rebuild from these rows
+    on the next startup, adopting the new dimension. Returns the number updated.
+    """
+    n = 0
+    with session_scope() as s:
+        for chunk_id, emb in items.items():
+            row = s.get(Chunk, chunk_id)
+            if row is not None:
+                row.embedding = _encode_embedding(emb)
+                n += 1
+    return n
+
+
 def count_chunks() -> int:
     with session_scope() as s:
         return s.execute(select(func.count(Chunk.chunk_id))).scalar() or 0
